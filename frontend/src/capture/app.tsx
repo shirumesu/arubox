@@ -1,12 +1,19 @@
-import { useEffect, useState, type PointerEvent } from "react";
+import { Events } from "@wailsio/runtime";
+import { useEffect, useLayoutEffect, useState, type PointerEvent } from "react";
 
-import { Service } from "@bindings/modules/translate";
+import { Service, type Frame } from "@bindings/modules/translate";
 
 interface Drag {
   x0: number;
   y0: number;
   x1: number;
   y1: number;
+}
+
+/** A frozen screen whose picture has been decoded. */
+interface Shown {
+  seq: number;
+  url: string;
 }
 
 /** Drags shorter than this on either side are taken as stray clicks. */
@@ -22,14 +29,70 @@ function area(d: Drag) {
 }
 
 /**
- * Covers the screen so the user can drag out the area whose text is
- * translated. Esc or the right button cancels.
+ * Shows a frozen picture of the screen so the user can drag out the area
+ * whose text is translated. Esc or the right button cancels.
  */
 export function Capture() {
+  const [shown, setShown] = useState<Shown | null>(null);
   const [drag, setDrag] = useState<Drag | null>(null);
 
+  // A capture arrives: load its picture, then show the window once drawn.
   useEffect(() => {
-    void Service.AttachCapture();
+    let latest = 0;
+    const load = (frame: Frame) => {
+      latest = frame.seq;
+      fetch(`/translate/capture.bmp?seq=${String(frame.seq)}`)
+        .then((response) => {
+          if (!response.ok) throw new Error(`capture ${String(response.status)}`);
+          return response.blob();
+        })
+        .then(async (blob) => {
+          const url = URL.createObjectURL(blob);
+          const image = new Image();
+          image.src = url;
+          await image.decode();
+          if (frame.seq !== latest) {
+            URL.revokeObjectURL(url);
+            return;
+          }
+          setDrag(null);
+          setShown({ seq: frame.seq, url });
+        })
+        .catch((err: unknown) => {
+          console.error(err);
+          void Service.CancelCapture();
+        });
+    };
+    const offStart = Events.On("translate:capture", (event) => {
+      load(event.data);
+    });
+    // The window hid: let go of the picture.
+    const offEnd = Events.On("translate:capture-end", () => {
+      latest = 0;
+      setDrag(null);
+      setShown(null);
+    });
+    Service.AttachCapture().then((frame) => {
+      if (frame) load(frame);
+    }, console.error);
+    return () => {
+      offStart();
+      offEnd();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!shown) return;
+    return () => {
+      URL.revokeObjectURL(shown.url);
+    };
+  }, [shown]);
+
+  useLayoutEffect(() => {
+    if (shown) void Service.PresentCapture(shown.seq);
+  }, [shown]);
+
+  useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         setDrag(null);
@@ -41,6 +104,8 @@ export function Capture() {
       window.removeEventListener("keydown", onKeyDown);
     };
   }, []);
+
+  if (!shown) return null;
 
   const onPointerDown = (e: PointerEvent<HTMLDivElement>) => {
     if (e.button === 2) {
@@ -63,7 +128,13 @@ export function Capture() {
     const a = area(drag);
     setDrag(null);
     if (a.width < minSize || a.height < minSize) return;
-    void Service.FinishCapture(Math.round(a.x), Math.round(a.y), Math.round(a.width), Math.round(a.height));
+    void Service.FinishCapture(
+      shown.seq,
+      Math.round(a.x),
+      Math.round(a.y),
+      Math.round(a.width),
+      Math.round(a.height),
+    );
   };
 
   const selected = drag ? area(drag) : null;
@@ -77,6 +148,7 @@ export function Capture() {
       }}
       className="relative h-full cursor-crosshair overflow-hidden"
     >
+      <img src={shown.url} alt="" draggable={false} className="absolute inset-0 size-full" />
       {selected ? (
         <>
           <div

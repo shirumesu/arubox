@@ -4,10 +4,11 @@
 package platform
 
 import (
+	"encoding/binary"
 	"errors"
+	"net/http"
+	"strconv"
 	"time"
-
-	"github.com/wailsapp/wails/v3/pkg/application"
 )
 
 // ErrNoAccessibility is returned when macOS has not granted the accessibility
@@ -71,14 +72,26 @@ func (img Image) Crop(x, y, width, height int) Image {
 	return out
 }
 
-// ScreenText reads the text shown inside r, leaving out arubox's own windows.
-// Line boxes are in pixels of the captured picture.
-func ScreenText(r application.Rect) ([]TextLine, error) {
-	img, err := CaptureScreen(r)
-	if err != nil {
-		return nil, err
-	}
-	return ImageText(img)
+// ServeBMP writes img as an uncompressed bitmap: its BGRA rows go out as they
+// are, without spending time on compression.
+func (img Image) ServeBMP(w http.ResponseWriter) {
+	const fileHeader, infoHeader = 14, 40
+	header := make([]byte, fileHeader+infoHeader)
+	size := len(img.Pixels)
+	copy(header, "BM")
+	// Screen sizes are far from overflowing these fields.
+	binary.LittleEndian.PutUint32(header[2:], uint32(fileHeader+infoHeader+size))
+	binary.LittleEndian.PutUint32(header[10:], fileHeader+infoHeader)
+	binary.LittleEndian.PutUint32(header[14:], infoHeader)
+	binary.LittleEndian.PutUint32(header[18:], uint32(img.Width))
+	// A negative height stores the rows top-down.
+	binary.LittleEndian.PutUint32(header[22:], uint32(-int32(img.Height)))
+	binary.LittleEndian.PutUint16(header[26:], 1)
+	binary.LittleEndian.PutUint16(header[28:], 32)
+	w.Header().Set("Content-Type", "image/bmp")
+	w.Header().Set("Content-Length", strconv.Itoa(len(header)+size))
+	_, _ = w.Write(header)
+	_, _ = w.Write(img.Pixels)
 }
 
 // minWindowSize leaves out windows too small to be worth capturing, such as

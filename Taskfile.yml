@@ -8,9 +8,6 @@ vars:
   LDFLAGS_VERSION: -X github.com/shirumesu/arubox/internal/core.Version={{.VERSION}}
   # Production builds drop the Wails dev server proxy and devtools.
   PROD_FLAGS: -trimpath -buildvcs=false
-  # On macOS, Wails makes a webview see-through only with WebKit's private
-  # drawsBackground switch, which the screenshot overlay needs.
-  MAC_TAGS: private_mac_apis
   DEV_FLAGS: -buildvcs=false -gcflags=all="-l"
 
 env:
@@ -59,7 +56,7 @@ tasks:
     desc: Build the macOS app bundle (bin/arubox.app)
     deps: [frontend]
     cmds:
-      - go build -tags production,{{.MAC_TAGS}} {{.PROD_FLAGS}} -ldflags="-w -s {{.LDFLAGS_VERSION}}" -o {{.BIN_DIR}}/{{.APP_NAME}} .
+      - go build -tags production {{.PROD_FLAGS}} -ldflags="-w -s {{.LDFLAGS_VERSION}}" -o {{.BIN_DIR}}/{{.APP_NAME}} .
       - task: bundle
         vars: {BUNDLE: '{{.APP_NAME}}.app', PLIST: build/darwin/Info.plist}
 
@@ -115,7 +112,7 @@ tasks:
     internal: true
     platforms: [darwin]
     cmds:
-      - go build -tags {{.MAC_TAGS}} {{.DEV_FLAGS}} -ldflags="{{.LDFLAGS_VERSION}}-dev" -o {{.BIN_DIR}}/{{.APP_NAME}} .
+      - go build {{.DEV_FLAGS}} -ldflags="{{.LDFLAGS_VERSION}}-dev" -o {{.BIN_DIR}}/{{.APP_NAME}} .
       - task: bundle
         vars: {BUNDLE: '{{.APP_NAME}}.dev.app', PLIST: build/darwin/Info.dev.plist}
       - '"{{.BIN_DIR}}/{{.APP_NAME}}.dev.app/Contents/MacOS/{{.APP_NAME}}"'

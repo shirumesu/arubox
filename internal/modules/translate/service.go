@@ -99,17 +99,27 @@ func (s *Service) Hide() {
 	}
 }
 
-// AttachCapture is called by the capture page once it has loaded.
-func (s *Service) AttachCapture() {
+// AttachCapture is called by the capture page once it has loaded. It
+// returns the capture that arrived while the page was loading, or nil.
+func (s *Service) AttachCapture() *Frame {
 	if c := s.module.currentCapture(); c != nil {
-		c.attach()
+		return c.attach()
+	}
+	return nil
+}
+
+// PresentCapture shows the capture window once the page has drawn capture
+// seq.
+func (s *Service) PresentCapture(seq int) {
+	if c := s.module.currentCapture(); c != nil {
+		c.present(seq)
 	}
 }
 
-// FinishCapture translates the text in the area the user dragged out, given
-// in the capture window's coordinates.
-func (s *Service) FinishCapture(x, y, width, height int) {
-	s.module.readScreen(application.Rect{X: x, Y: y, Width: width, Height: height})
+// FinishCapture translates the text in the area the user dragged out of
+// capture seq, given in the capture window's coordinates.
+func (s *Service) FinishCapture(seq, x, y, width, height int) {
+	s.module.readScreen(seq, application.Rect{X: x, Y: y, Width: width, Height: height})
 }
 
 // CancelCapture hides the capture window.

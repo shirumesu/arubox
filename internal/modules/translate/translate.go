@@ -70,9 +70,13 @@ func (m *Module) Info() module.Info {
 	}
 }
 
-// Services binds the popup and the settings page.
+// Services binds the popup, the capture page and the settings page, and
+// serves the frozen screen to the capture page.
 func (m *Module) Services() []application.Service {
-	return []application.Service{application.NewService(&Service{module: m})}
+	return []application.Service{
+		application.NewService(&Service{module: m}),
+		application.NewServiceWithOptions(&frames{module: m}, application.ServiceOptions{Route: frameRoute}),
+	}
 }
 
 // Hotkeys declares the hotkeys. On Windows, Alt with a letter is taken by
@@ -164,8 +168,8 @@ func (m *Module) translateSelection() {
 	}
 }
 
-// translateScreen lets the user drag out an area of the screen whose text
-// is then translated.
+// translateScreen freezes the screen and lets the user drag out an area
+// whose text is then translated.
 func (m *Module) translateScreen() {
 	p, c := m.currentPopup(), m.currentCapture()
 	if p == nil || c == nil {
@@ -176,7 +180,14 @@ func (m *Module) translateScreen() {
 		p.open(screenPermissionRequest)
 		return
 	}
-	c.start()
+	err := c.start()
+	switch {
+	case errors.Is(err, platform.ErrNoScreenCapture):
+		p.open(screenPermissionRequest)
+	case err != nil:
+		m.log.Warn("capture screen", "error", err)
+		p.open(Request{Notice: err.Error() + "，可以直接输入要翻译的内容。"})
+	}
 }
 
 var screenPermissionRequest = Request{
@@ -184,18 +195,20 @@ var screenPermissionRequest = Request{
 	Permission: permissionScreen,
 }
 
-// readScreen translates the text in the area the user dragged out, given
-// relative to the capture window.
-func (m *Module) readScreen(area application.Rect) {
+// readScreen translates the text in the area the user dragged out of
+// capture seq, given relative to the capture window.
+func (m *Module) readScreen(seq int, area application.Rect) {
 	p, c := m.currentPopup(), m.currentCapture()
 	if p == nil || c == nil {
 		return
 	}
-	lines, err := platform.ScreenText(c.finish(area))
+	img, ok := c.finish(seq, area)
+	if !ok {
+		return
+	}
+	lines, err := platform.ImageText(img)
 	text := platform.Paragraphs(lines)
 	switch {
-	case errors.Is(err, platform.ErrNoScreenCapture):
-		p.open(screenPermissionRequest)
 	case err != nil:
 		m.log.Warn("read screen", "error", err)
 		p.open(Request{Notice: err.Error() + "，可以直接输入要翻译的内容。"})
