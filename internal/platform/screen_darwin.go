@@ -237,6 +237,10 @@ func OpenScreenCaptureSettings() {
 	C.openScreenCaptureSettings()
 }
 
+// PrepareScreenCapture does nothing on macOS, where the first capture is as
+// quick as the next.
+func PrepareScreenCapture() {}
+
 // CaptureScreen takes a picture of r, leaving out arubox's own windows, at
 // the screen's full resolution.
 func CaptureScreen(r application.Rect) (Image, error) {

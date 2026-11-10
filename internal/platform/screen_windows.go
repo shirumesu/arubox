@@ -19,15 +19,10 @@ var (
 	procWindowsDeleteString       = combase.NewProc("WindowsDeleteString")
 	procWindowsGetStringRawBuffer = combase.NewProc("WindowsGetStringRawBuffer")
 
-	gdi32                  = windows.NewLazySystemDLL("gdi32.dll")
-	procCreateCompatibleDC = gdi32.NewProc("CreateCompatibleDC")
-	procCreateDIBSection   = gdi32.NewProc("CreateDIBSection")
-	procSelectObject       = gdi32.NewProc("SelectObject")
-	procBitBlt             = gdi32.NewProc("BitBlt")
-	procDeleteObject       = gdi32.NewProc("DeleteObject")
-	procDeleteDC           = gdi32.NewProc("DeleteDC")
-	procGetDC              = user32.NewProc("GetDC")
-	procReleaseDC          = user32.NewProc("ReleaseDC")
+	gdi32            = windows.NewLazySystemDLL("gdi32.dll")
+	procDeleteObject = gdi32.NewProc("DeleteObject")
+	procGetDC        = user32.NewProc("GetDC")
+	procReleaseDC    = user32.NewProc("ReleaseDC")
 
 	dwmapi       = windows.NewLazySystemDLL("dwmapi.dll")
 	procDwmFlush = dwmapi.NewProc("DwmFlush")
@@ -64,8 +59,6 @@ const (
 	alphaModeIgnore     = 2
 	asyncStarted        = 0
 	asyncCompleted      = 1
-	srcCopy             = 0x00CC0020
-	captureBlt          = 0x40000000
 )
 
 // ScreenCaptureAllowed reports whether arubox may read the screen. Windows
@@ -115,39 +108,6 @@ type bitmapInfo struct {
 	ClrUsed       uint32
 	ClrImportant  uint32
 	Colors        [1]uint32
-}
-
-// capturePixels copies a rectangle of the screen, in physical pixels, as
-// top-down BGRA.
-func capturePixels(r application.Rect) ([]byte, error) {
-	failed := errors.New("截取屏幕失败")
-	screen, _, _ := procGetDC.Call(0)
-	if screen == 0 {
-		return nil, failed
-	}
-	defer procReleaseDC.Call(0, screen)
-	memory, _, _ := procCreateCompatibleDC.Call(screen)
-	if memory == 0 {
-		return nil, failed
-	}
-	defer procDeleteDC.Call(memory)
-	// A negative height makes the rows run top-down.
-	info := bitmapInfo{Width: int32(r.Width), Height: -int32(r.Height), Planes: 1, BitCount: 32}
-	info.Size = uint32(unsafe.Offsetof(info.Colors))
-	var bits unsafe.Pointer
-	bitmap, _, _ := procCreateDIBSection.Call(memory, uintptr(unsafe.Pointer(&info)), 0, uintptr(unsafe.Pointer(&bits)), 0, 0)
-	if bitmap == 0 || bits == nil {
-		return nil, failed
-	}
-	defer procDeleteObject.Call(bitmap)
-	previous, _, _ := procSelectObject.Call(memory, bitmap)
-	defer procSelectObject.Call(memory, previous)
-	ok, _, _ := procBitBlt.Call(memory, 0, 0, uintptr(r.Width), uintptr(r.Height),
-		screen, uintptr(r.X), uintptr(r.Y), srcCopy|captureBlt)
-	if ok == 0 {
-		return nil, failed
-	}
-	return append([]byte(nil), unsafe.Slice((*byte)(bits), r.Width*r.Height*4)...), nil
 }
 
 // recognize runs Windows.Media.Ocr on BGRA pixels, in the languages of the
