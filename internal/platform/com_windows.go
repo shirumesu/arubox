@@ -12,6 +12,12 @@ const slotRelease = 2
 type comObject unsafe.Pointer
 
 // call invokes the method in the given slot of the object's virtual table.
+// Arguments are often pointers to out-parameters converted to uintptr; the
+// directive keeps what they point to on the heap for the call, as for
+// windows.LazyProc.Call. On the stack, a variable could move when the stack
+// grows, and the method would write its result to where it used to be.
+//
+//go:uintptrescapes
 func call(o comObject, slot int, args ...uintptr) uintptr {
 	vtable := *(*unsafe.Pointer)(o)
 	method := *(*uintptr)(unsafe.Add(vtable, uintptr(slot)*unsafe.Sizeof(uintptr(0))))
