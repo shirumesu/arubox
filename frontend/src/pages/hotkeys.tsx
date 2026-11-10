@@ -42,6 +42,23 @@ function HotkeyRow({
   platform: Platform;
   mutate: Mutate;
 }) {
+  const set = (accelerator: string, force = false): Promise<boolean> =>
+    mutate(
+      () => DashboardService.SetHotkey(h.id, accelerator, force),
+      (err) => {
+        const c = conflictOf(err);
+        if (!c || force) return undefined;
+        const run = () => void set(accelerator, true);
+        return c.kind === "hotkey"
+          ? { label: "改用这里", description: `「${c.name}」的快捷键会被清除。`, run }
+          : {
+              label: "仍然使用",
+              description: `「${c.name}」在所有程序里都会失效；系统抢先处理的组合可能仍然触发不了。`,
+              run,
+            };
+      },
+    );
+
   return (
     <Row
       title={
@@ -52,11 +69,7 @@ function HotkeyRow({
       }
       note={h.error}
     >
-      <HotkeyRecorder
-        value={h.accelerator}
-        platform={platform}
-        onRecord={(accel) => mutate(() => DashboardService.SetHotkey(h.id, accel))}
-      />
+      <HotkeyRecorder value={h.accelerator} platform={platform} onRecord={(accel) => set(accel)} />
       <IconAction
         label="恢复默认"
         hidden={h.accelerator === h.default}
@@ -64,15 +77,23 @@ function HotkeyRow({
       >
         <RotateCcw />
       </IconAction>
-      <IconAction
-        label="清除"
-        hidden={h.accelerator === ""}
-        onClick={() => void mutate(() => DashboardService.SetHotkey(h.id, ""))}
-      >
+      <IconAction label="清除" hidden={h.accelerator === ""} onClick={() => void set("")}>
         <X />
       </IconAction>
     </Row>
   );
+}
+
+/**
+ * The hotkey or system shortcut that already uses a combination, from the
+ * hotkey.Conflict a failed SetHotkey carries as its cause.
+ */
+function conflictOf(err: unknown): { kind: "hotkey" | "system"; name: string } | null {
+  if (!(err instanceof Error) || typeof err.cause !== "object" || err.cause === null) return null;
+  const c = err.cause as { hotkey?: string; system?: string };
+  if (c.hotkey) return { kind: "hotkey", name: c.hotkey };
+  if (c.system) return { kind: "system", name: c.system };
+  return null;
 }
 
 /** An icon button that keeps its space when hidden, so rows stay aligned. */

@@ -28,12 +28,19 @@ export function useDashboard() {
   }, []);
 
   const mutate = useCallback(
-    async (call: () => Promise<State>): Promise<boolean> => {
+    async (
+      call: () => Promise<State>,
+      followUp?: (err: unknown) => FollowUp | undefined,
+    ): Promise<boolean> => {
       try {
         setState(await call());
         return true;
       } catch (err) {
-        toast.error(errorMessage(err));
+        const next = followUp?.(err);
+        toast.error(
+          errorMessage(err),
+          next && { description: next.description, action: { label: next.label, onClick: next.run } },
+        );
         await reload();
         return false;
       }
@@ -45,3 +52,10 @@ export function useDashboard() {
 }
 
 export type Mutate = ReturnType<typeof useDashboard>["mutate"];
+
+/** What the error toast of a failed mutation offers to do instead. */
+export interface FollowUp {
+  label: string;
+  description: string;
+  run: () => void;
+}

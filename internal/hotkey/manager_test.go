@@ -117,7 +117,7 @@ func TestActivateReportsOccupiedHotkey(t *testing.T) {
 func TestSetRebindsAndPersists(t *testing.T) {
 	m, os, store := newTestManager(t)
 	m.Activate("core")
-	if err := m.Set("core.dashboard", "super+shift+K"); err != nil {
+	if err := m.Set("core.dashboard", "super+shift+K", false); err != nil {
 		t.Fatal(err)
 	}
 	if got := os.keys(); !slices.Equal(got, []string{"Shift+Super+k"}) {
@@ -133,17 +133,17 @@ func TestSetRejectsConflicts(t *testing.T) {
 	m.Activate("core")
 
 	// Another hotkey of this program, even one whose module is disabled.
-	err := m.Set("core.dashboard", "Ctrl+Alt+t")
+	err := m.Set("core.dashboard", "Ctrl+Alt+t", false)
 	if err == nil || !strings.Contains(err.Error(), "输入翻译") {
 		t.Fatalf("err = %v, want conflict with 输入翻译", err)
 	}
 	// A system shortcut.
-	if err := m.Set("core.dashboard", "Super+space"); err == nil || !strings.Contains(err.Error(), "聚焦搜索") {
+	if err := m.Set("core.dashboard", "Super+space", false); err == nil || !strings.Contains(err.Error(), "聚焦搜索") {
 		t.Fatalf("err = %v, want conflict with 聚焦搜索", err)
 	}
 	// Another program.
 	os.taken["Ctrl+Alt+x"] = true
-	if err := m.Set("core.dashboard", "Ctrl+Alt+x"); !errors.Is(err, ErrOccupied) {
+	if err := m.Set("core.dashboard", "Ctrl+Alt+x", false); !errors.Is(err, ErrOccupied) {
 		t.Fatalf("err = %v, want ErrOccupied", err)
 	}
 	// The old binding survives every failure.
@@ -158,10 +158,10 @@ func TestSetRejectsConflicts(t *testing.T) {
 func TestSetProbesInactiveHotkeys(t *testing.T) {
 	m, os, store := newTestManager(t)
 	os.taken["Ctrl+Alt+x"] = true
-	if err := m.Set("translate.selection", "Ctrl+Alt+x"); !errors.Is(err, ErrOccupied) {
+	if err := m.Set("translate.selection", "Ctrl+Alt+x", false); !errors.Is(err, ErrOccupied) {
 		t.Fatalf("err = %v, want ErrOccupied", err)
 	}
-	if err := m.Set("translate.selection", "Ctrl+Alt+s"); err != nil {
+	if err := m.Set("translate.selection", "Ctrl+Alt+s", false); err != nil {
 		t.Fatal(err)
 	}
 	if len(os.bound) != 0 {
@@ -175,7 +175,7 @@ func TestSetProbesInactiveHotkeys(t *testing.T) {
 func TestUnbindAndReset(t *testing.T) {
 	m, os, store := newTestManager(t)
 	m.Activate("core")
-	if err := m.Set("core.dashboard", ""); err != nil {
+	if err := m.Set("core.dashboard", "", false); err != nil {
 		t.Fatal(err)
 	}
 	if len(os.bound) != 0 || status(m, "core.dashboard").Accelerator != "" {
@@ -199,7 +199,7 @@ func TestFailedSaveRestoresBinding(t *testing.T) {
 	m, os, store := newTestManager(t)
 	m.Activate("core")
 	store.failSave = true
-	if err := m.Set("core.dashboard", "Ctrl+Alt+q"); err == nil {
+	if err := m.Set("core.dashboard", "Ctrl+Alt+q", false); err == nil {
 		t.Fatal("Set succeeded although saving failed")
 	}
 	if got := os.keys(); !slices.Equal(got, []string{"Ctrl+Alt+d"}) {
@@ -215,7 +215,7 @@ func TestSuspendAndResume(t *testing.T) {
 		t.Fatalf("suspended but bound: %v", os.keys())
 	}
 	// Recording a new binding while suspended takes effect on resume.
-	if err := m.Set("core.dashboard", "Ctrl+Alt+n"); err != nil {
+	if err := m.Set("core.dashboard", "Ctrl+Alt+n", false); err != nil {
 		t.Fatal(err)
 	}
 	if len(os.bound) != 0 {

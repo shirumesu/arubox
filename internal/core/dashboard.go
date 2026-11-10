@@ -157,9 +157,11 @@ func (s *DashboardService) SetModuleEnabled(id string, enabled bool) (State, err
 	return s.State(), err
 }
 
-// SetHotkey binds a hotkey; an empty accelerator unbinds it.
-func (s *DashboardService) SetHotkey(id, accelerator string) (State, error) {
-	err := s.core.hotkeys.Set(id, accelerator)
+// SetHotkey binds a hotkey; an empty accelerator unbinds it. A combination
+// another hotkey or a system shortcut uses fails with a hotkey.Conflict,
+// whose fields reach the page as the error's cause; force takes it anyway.
+func (s *DashboardService) SetHotkey(id, accelerator string, force bool) (State, error) {
+	err := s.core.hotkeys.Set(id, accelerator, force)
 	return s.State(), err
 }
 

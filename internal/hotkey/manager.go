@@ -130,11 +130,31 @@ func (m *Manager) Deactivate(owner string) {
 	}
 }
 
+// Conflict is the error for a combination that another hotkey of arubox or
+// a system shortcut already uses.
+type Conflict struct {
+	// Hotkey names the hotkey of arubox that has it, as "owner · label".
+	Hotkey string `json:"hotkey,omitempty"`
+	// System names the system shortcut it is, when Hotkey is empty.
+	System string `json:"system,omitempty"`
+	other  *entry
+}
+
+func (c *Conflict) Error() string {
+	if c.Hotkey != "" {
+		return fmt.Sprintf("与「%s」冲突", c.Hotkey)
+	}
+	return fmt.Sprintf("与系统快捷键「%s」冲突", c.System)
+}
+
 // Set binds a hotkey to accelerator, or unbinds it when accelerator is empty.
 // It fails, leaving the old binding in place, when the accelerator is invalid
-// or conflicts with another hotkey, a system shortcut or another program.
-func (m *Manager) Set(id, accelerator string) error {
-	return m.change(id, accelerator, func(canonical string) error { return m.store.SetHotkey(id, canonical) })
+// or taken by another program, or with a *Conflict when another hotkey or a
+// system shortcut uses it. With force a conflict is overridden: another
+// hotkey that has the combination is left unbound, and a system shortcut
+// gives way to the hotkey in every program.
+func (m *Manager) Set(id, accelerator string, force bool) error {
+	return m.change(id, accelerator, force, func(canonical string) error { return m.store.SetHotkey(id, canonical) })
 }
 
 // Reset restores a hotkey's default binding.
@@ -145,12 +165,13 @@ func (m *Manager) Reset(id string) error {
 	if !ok {
 		return fmt.Errorf("unknown hotkey %q", id)
 	}
-	return m.change(id, e.def.Default, func(string) error { return m.store.ResetHotkey(id) })
+	return m.change(id, e.def.Default, false, func(string) error { return m.store.ResetHotkey(id) })
 }
 
 // change validates and applies accelerator, then calls persist with its
-// canonical form, undoing the change if persisting fails.
-func (m *Manager) change(id, accelerator string, persist func(canonical string) error) error {
+// canonical form, undoing the change if persisting fails. force overrides a
+// conflict, as for Set.
+func (m *Manager) change(id, accelerator string, force bool, persist func(canonical string) error) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	e, ok := m.entries[id]
@@ -163,36 +184,66 @@ func (m *Manager) change(id, accelerator string, persist func(canonical string) 
 			return err
 		}
 		accelerator = canonical
-		if err := m.checkConflicts(e, accelerator); err != nil {
-			return err
+	}
+	// undo gives the combination back to the hotkey it was taken from.
+	undo := func() {}
+	if c := m.conflict(e, accelerator); c != nil {
+		if !force {
+			return c
+		}
+		if other := c.other; other != nil {
+			previous := m.effective(other)
+			m.unbind(other)
+			if err := m.store.SetHotkey(other.id, ""); err != nil {
+				m.rebind(other)
+				return fmt.Errorf("保存设置失败：%w", err)
+			}
+			undo = func() {
+				if err := m.store.SetHotkey(other.id, previous); err != nil {
+					m.log.Error("give hotkey back", "id", other.id, "error", err)
+				}
+				m.rebind(other)
+			}
 		}
 	}
 	old := m.effective(e)
 	if err := m.apply(e, accelerator); err != nil {
+		undo()
 		return err
 	}
 	if err := persist(accelerator); err != nil {
 		if rollbackErr := m.apply(e, old); rollbackErr != nil {
 			m.log.Error("restore hotkey after failed save", "id", id, "error", rollbackErr)
 		}
+		undo()
 		return fmt.Errorf("保存设置失败：%w", err)
 	}
 	return nil
 }
 
-// checkConflicts reports whether accelerator is taken by another hotkey of
-// this program (enabled or not, so enabling a module later cannot clash) or
-// by a known system shortcut.
-func (m *Manager) checkConflicts(e *entry, accelerator string) error {
+// conflict reports whether accelerator is taken by another hotkey of this
+// program (enabled or not, so enabling a module later cannot clash) or by a
+// known system shortcut.
+func (m *Manager) conflict(e *entry, accelerator string) *Conflict {
+	if accelerator == "" {
+		return nil
+	}
 	for _, other := range m.order {
 		if other != e && m.effective(other) == accelerator {
-			return fmt.Errorf("与「%s · %s」冲突", other.ownerName, other.def.Label)
+			return &Conflict{Hotkey: other.ownerName + " · " + other.def.Label, other: other}
 		}
 	}
 	if name, ok := m.system()[accelerator]; ok {
-		return fmt.Errorf("与系统快捷键「%s」冲突", name)
+		return &Conflict{System: name}
 	}
 	return nil
+}
+
+// rebind registers e's stored binding again if its module is enabled.
+func (m *Manager) rebind(e *entry) {
+	if e.active {
+		m.bind(e)
+	}
 }
 
 // apply makes accelerator the live binding of e. For a hotkey that is not
