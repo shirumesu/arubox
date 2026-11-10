@@ -27,6 +27,8 @@ type Config struct {
 // Module is the persisted state of one module.
 type Module struct {
 	Enabled bool `json:"enabled"`
+	// Settings is the module's own settings, in a shape only it knows.
+	Settings json.RawMessage `json:"settings,omitempty"`
 }
 
 // Store is a concurrency-safe view of the settings file. Every mutation is
@@ -102,6 +104,37 @@ func (s *Store) SetModuleEnabled(id string, enabled bool) error {
 		}
 		m := c.Modules[id]
 		m.Enabled = enabled
+		c.Modules[id] = m
+	})
+}
+
+// ModuleSettings decodes a module's settings into v. Fields the file does not
+// have keep the values v already holds, so callers pass in the defaults.
+func (s *Store) ModuleSettings(id string, v any) error {
+	s.mu.RLock()
+	raw := s.data.Modules[id].Settings
+	s.mu.RUnlock()
+	if raw == nil {
+		return nil
+	}
+	if err := json.Unmarshal(raw, v); err != nil {
+		return fmt.Errorf("read %s settings: %w", id, err)
+	}
+	return nil
+}
+
+// SetModuleSettings stores a module's settings.
+func (s *Store) SetModuleSettings(id string, v any) error {
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return fmt.Errorf("encode %s settings: %w", id, err)
+	}
+	return s.update(func(c *Config) {
+		if c.Modules == nil {
+			c.Modules = map[string]Module{}
+		}
+		m := c.Modules[id]
+		m.Settings = raw
 		c.Modules[id] = m
 	})
 }

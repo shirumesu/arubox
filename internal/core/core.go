@@ -16,6 +16,7 @@ import (
 	"github.com/shirumesu/arubox/internal/hotkey"
 	"github.com/shirumesu/arubox/internal/logging"
 	"github.com/shirumesu/arubox/internal/module"
+	"github.com/shirumesu/arubox/internal/modules/translate"
 )
 
 // Version is set at build time.
@@ -63,14 +64,19 @@ func Run(assets fs.FS) error {
 	}
 
 	c := &Core{log: log, logDir: logDir}
+	modules := []module.Module{
+		translate.New(store, log),
+	}
+	services := []application.Service{application.NewService(&DashboardService{core: c})}
+	for _, m := range modules {
+		services = append(services, m.Services()...)
+	}
 	c.app = application.New(application.Options{
 		Name:        appName,
 		Description: "个人工具箱",
 		// Wails logs every asset request at info level; keep only problems.
-		Logger: logging.New(logOut, slog.LevelWarn),
-		Services: []application.Service{
-			application.NewService(&DashboardService{core: c}),
-		},
+		Logger:   logging.New(logOut, slog.LevelWarn),
+		Services: services,
 		Assets: application.AssetOptions{
 			Handler: application.AssetFileServerFS(assets),
 		},
@@ -90,8 +96,7 @@ func Run(assets fs.FS) error {
 	c.hotkeys.Define(coreOwner, appName, []hotkey.Def{
 		{ID: "dashboard", Label: "打开仪表盘", Action: c.dashboard.open},
 	})
-	// Modules are registered here.
-	c.modules = module.NewRegistry(module.Context{App: c.app, Log: log}, store, c.hotkeys, []module.Module{})
+	c.modules = module.NewRegistry(module.Context{App: c.app, Log: log}, store, c.hotkeys, modules)
 
 	setupTray(c)
 	c.app.Event.OnApplicationEvent(events.Common.ApplicationStarted, func(*application.ApplicationEvent) {

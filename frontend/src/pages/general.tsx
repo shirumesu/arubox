@@ -5,7 +5,8 @@ import { DashboardService } from "@bindings/core";
 import { Row, Section } from "@/components/settings";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
-import { errorMessage, type Mutate, type State } from "@/lib/dashboard";
+import type { Mutate, State } from "@/lib/dashboard";
+import { errorMessage } from "@/lib/errors";
 
 export function GeneralPage({ state, mutate }: { state: State; mutate: Mutate }) {
   const openLogs = () => {

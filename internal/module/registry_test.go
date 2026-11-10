@@ -7,6 +7,8 @@ import (
 	"runtime"
 	"testing"
 
+	"github.com/wailsapp/wails/v3/pkg/application"
+
 	"github.com/shirumesu/arubox/internal/hotkey"
 )
 
@@ -17,6 +19,8 @@ type fakeModule struct {
 }
 
 func (m *fakeModule) Info() Info { return m.info }
+
+func (m *fakeModule) Services() []application.Service { return nil }
 
 func (m *fakeModule) Hotkeys() []hotkey.Def {
 	return []hotkey.Def{{ID: "go", Label: "Go", Default: "Ctrl+Alt+" + m.info.ID[:1], Action: func() {}}}

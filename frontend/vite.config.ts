@@ -18,5 +18,15 @@ export default defineConfig({
       "@bindings": fileURLToPath(new URL("./bindings/github.com/shirumesu/arubox/internal", import.meta.url)),
     },
   },
+  build: {
+    // One page per window, so each loads only its own code.
+    rolldownOptions: {
+      input: {
+        dashboard: fileURLToPath(new URL("./index.html", import.meta.url)),
+        translator: fileURLToPath(new URL("./translator.html", import.meta.url)),
+        capture: fileURLToPath(new URL("./capture.html", import.meta.url)),
+      },
+    },
+  },
   plugins: [react(), tailwindcss(), wails("./bindings")],
 });

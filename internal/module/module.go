@@ -30,6 +30,9 @@ type Context struct {
 // Enable, and releases everything in Disable.
 type Module interface {
 	Info() Info
+	// Services are bound for the frontend from startup, enabled or not, so
+	// the dashboard can change a module's settings before enabling it.
+	Services() []application.Service
 	// Hotkeys declares the module's hotkeys. They are registered after
 	// Enable succeeds and unregistered before Disable.
 	Hotkeys() []hotkey.Def

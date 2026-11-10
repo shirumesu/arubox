@@ -14,6 +14,11 @@ linters:
     - unparam
     - usestdlibvars
   settings:
+    errcheck:
+      exclude-functions:
+        # The error is GetLastError, meaningful only when the result reports
+        # a failure; callers check the result instead.
+        - (*golang.org/x/sys/windows.LazyProc).Call
     revive:
       rules:
         - name: exported
@@ -31,6 +36,12 @@ linters:
   exclusions:
     presets:
       - std-error-handling
+    rules:
+      # System calls need unsafe pointers and fixed-width conversions; they
+      # are confined to the platform layer.
+      - path: internal/platform/
+        linters: [gosec]
+        text: "G103|G115"
 
 formatters:
   enable:

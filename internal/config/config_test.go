@@ -82,3 +82,43 @@ func TestFailedWriteKeepsMemoryUnchanged(t *testing.T) {
 		t.Error("failed write changed the in-memory settings")
 	}
 }
+
+func TestModuleSettingsKeepDefaultsAndEnabledState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	s, err := Open(path, discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	type settings struct {
+		Target string `json:"target"`
+		Idle   int    `json:"idle"`
+	}
+	if err := s.SetModuleEnabled("translate", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetModuleSettings("translate", map[string]string{"target": "ja"}); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(path, discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := settings{Target: "zh-CN", Idle: 30}
+	if err := reopened.ModuleSettings("translate", &got); err != nil {
+		t.Fatal(err)
+	}
+	if got != (settings{Target: "ja", Idle: 30}) {
+		t.Errorf("settings = %+v; want stored target and default idle", got)
+	}
+	if !reopened.ModuleEnabled("translate") {
+		t.Error("saving settings lost the enabled state")
+	}
+	if err := reopened.SetModuleEnabled("translate", false); err != nil {
+		t.Fatal(err)
+	}
+	got = settings{}
+	if err := reopened.ModuleSettings("translate", &got); err != nil || got.Target != "ja" {
+		t.Errorf("settings after disabling = %+v, %v", got, err)
+	}
+}

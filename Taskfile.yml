@@ -7,13 +7,16 @@ vars:
   VITE_PORT: '{{.WAILS_VITE_PORT | default 9245}}'
   LDFLAGS_VERSION: -X github.com/shirumesu/arubox/internal/core.Version={{.VERSION}}
   # Production builds drop the Wails dev server proxy and devtools.
-  PROD_FLAGS: -tags production -trimpath -buildvcs=false
+  PROD_FLAGS: -trimpath -buildvcs=false
+  # On macOS, Wails makes a webview see-through only with WebKit's private
+  # drawsBackground switch, which the screenshot overlay needs.
+  MAC_TAGS: private_mac_apis
   DEV_FLAGS: -buildvcs=false -gcflags=all="-l"
 
 env:
-  MACOSX_DEPLOYMENT_TARGET: '13.0'
-  CGO_CFLAGS: -mmacosx-version-min=13.0
-  CGO_LDFLAGS: -mmacosx-version-min=13.0
+  MACOSX_DEPLOYMENT_TARGET: '14.0'
+  CGO_CFLAGS: -mmacosx-version-min=14.0
+  CGO_LDFLAGS: -mmacosx-version-min=14.0
 
 tasks:
   default:
@@ -56,7 +59,7 @@ tasks:
     desc: Build the macOS app bundle (bin/arubox.app)
     deps: [frontend]
     cmds:
-      - go build {{.PROD_FLAGS}} -ldflags="-w -s {{.LDFLAGS_VERSION}}" -o {{.BIN_DIR}}/{{.APP_NAME}} .
+      - go build -tags production,{{.MAC_TAGS}} {{.PROD_FLAGS}} -ldflags="-w -s {{.LDFLAGS_VERSION}}" -o {{.BIN_DIR}}/{{.APP_NAME}} .
       - task: bundle
         vars: {BUNDLE: '{{.APP_NAME}}.app', PLIST: build/darwin/Info.plist}
 
@@ -73,7 +76,7 @@ tasks:
         -manifest build/windows/arubox.exe.manifest
         -info build/windows/info.json
         -out {{.APP_NAME}}_windows_{{.ARCH}}.syso
-      - go build {{.PROD_FLAGS}} -ldflags="-w -s -H windowsgui {{.LDFLAGS_VERSION}}" -o {{.BIN_DIR}}/{{.APP_NAME}}.exe .
+      - go build -tags production {{.PROD_FLAGS}} -ldflags="-w -s -H windowsgui {{.LDFLAGS_VERSION}}" -o {{.BIN_DIR}}/{{.APP_NAME}}.exe .
     env:
       GOOS: windows
       GOARCH: '{{.ARCH}}'
@@ -96,7 +99,7 @@ tasks:
     desc: Build a development bundle and run it (used by `task dev`)
     deps: [frontend]
     cmds:
-      - go build {{.DEV_FLAGS}} -ldflags="{{.LDFLAGS_VERSION}}-dev" -o {{.BIN_DIR}}/{{.APP_NAME}} .
+      - go build -tags {{.MAC_TAGS}} {{.DEV_FLAGS}} -ldflags="{{.LDFLAGS_VERSION}}-dev" -o {{.BIN_DIR}}/{{.APP_NAME}} .
       - task: bundle
         vars: {BUNDLE: '{{.APP_NAME}}.dev.app', PLIST: build/darwin/Info.dev.plist}
       - '"{{.BIN_DIR}}/{{.APP_NAME}}.dev.app/Contents/MacOS/{{.APP_NAME}}"'

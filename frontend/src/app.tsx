@@ -1,22 +1,33 @@
-import { Blocks, Keyboard, Settings2, type LucideIcon } from "lucide-react";
-import { useState, type CSSProperties } from "react";
+import { Blocks, Keyboard, Languages, Settings2, type LucideIcon } from "lucide-react";
+import { useState, type CSSProperties, type ReactNode } from "react";
 
 import appIcon from "../../build/icons/appicon.svg";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { useDashboard } from "@/lib/dashboard";
+import { useDashboard, type Mutate, type State } from "@/lib/dashboard";
+import { TranslateSettingsPage } from "@/modules/translate/settings";
 import { GeneralPage } from "@/pages/general";
 import { HotkeysPage } from "@/pages/hotkeys";
 import { ModulesPage } from "@/pages/modules";
 import { cn } from "cn";
 
+interface Page {
+  id: string;
+  title: string;
+  icon: LucideIcon;
+  Page: (props: { state: State; mutate: Mutate }) => ReactNode;
+}
+
 const pages = [
   { id: "general", title: "通用", icon: Settings2, Page: GeneralPage },
   { id: "modules", title: "模块", icon: Blocks, Page: ModulesPage },
   { id: "hotkeys", title: "快捷键", icon: Keyboard, Page: HotkeysPage },
-] as const satisfies readonly { id: string; title: string; icon: LucideIcon; Page: unknown }[];
+] as const satisfies readonly Page[];
 
-type Page = (typeof pages)[number];
+/** Settings pages of the modules, keyed by module id. */
+const modulePages: Page[] = [
+  { id: "translate", title: "翻译", icon: Languages, Page: TranslateSettingsPage },
+];
 
 /** Lets the area act as the window's title bar on macOS, where the system one is hidden. */
 const dragRegion = { "--wails-draggable": "drag" } as CSSProperties;
@@ -26,6 +37,7 @@ export function App() {
   const [page, setPage] = useState<Page>(pages[0]);
 
   if (!state) return null;
+  const shownModulePages = modulePages.filter((p) => state.modules?.some((m) => m.id === p.id));
   // macOS draws the traffic lights over the content; leave room for them.
   const titleBar = state.platform === "darwin" ? "h-13" : "h-4";
 
@@ -40,6 +52,20 @@ export function App() {
           </div>
           <nav className="flex flex-col gap-0.5 px-2">
             {pages.map((p) => (
+              <NavItem
+                key={p.id}
+                icon={p.icon}
+                title={p.title}
+                active={p.id === page.id}
+                onClick={() => {
+                  setPage(p);
+                }}
+              />
+            ))}
+            {shownModulePages.length > 0 && (
+              <div className="px-2.5 pt-4 pb-1 text-xs font-medium text-muted-foreground">工具</div>
+            )}
+            {shownModulePages.map((p) => (
               <NavItem
                 key={p.id}
                 icon={p.icon}
