@@ -33,18 +33,23 @@ const maxTranslated = 2000
 // translate returns a row with the query's translation, when the query reads
 // as text to translate rather than something to find or calculate: a
 // sentence, Chinese, Japanese or Korean, or a word that names no app.
-func (m *Module) translate(ctx context.Context, query string) []Result {
+// always translates any text, for the translate keyword.
+func (m *Module) translate(ctx context.Context, query string, always bool) []Result {
 	q := strings.TrimSpace(query)
-	if m.translator == nil || !m.wantsTranslation(q) {
+	if m.translator == nil || q == "" || (!always && !m.wantsTranslation(q)) {
 		return nil
 	}
 	t, ok, err := m.translator.Translate(ctx, q)
 	switch {
-	case !ok || errors.Is(err, context.Canceled) || ctx.Err() != nil:
+	case errors.Is(err, context.Canceled) || ctx.Err() != nil:
+		return nil
+	case !ok && always:
+		return []Result{{Kind: kindTranslation, Title: "翻译模块未启用", Subtitle: "在仪表盘里启用翻译模块后可用"}}
+	case !ok:
 		return nil
 	case err != nil:
 		return []Result{{Kind: kindTranslation, Title: "翻译失败", Subtitle: err.Error()}}
-	case strings.EqualFold(strings.TrimSpace(t.Text), q):
+	case !always && strings.EqualFold(strings.TrimSpace(t.Text), q):
 		// Nothing to show for text that is already in the target language.
 		return nil
 	}

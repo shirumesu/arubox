@@ -15,13 +15,20 @@ type SettingsState struct {
 	Settings Settings `json:"settings"`
 	// Currencies are the codes a home currency can be chosen from.
 	Currencies []string `json:"currencies"`
+	// DefaultKeywords are the website keywords the launcher comes with.
+	DefaultKeywords []Keyword `json:"defaultKeywords"`
 	// Platform is the GOOS value: "darwin" or "windows".
 	Platform string `json:"platform"`
 }
 
 // State returns the settings.
 func (s *Service) State() SettingsState {
-	return SettingsState{Settings: s.module.currentSettings(), Currencies: currencies, Platform: runtime.GOOS}
+	return SettingsState{
+		Settings:        s.module.currentSettings(),
+		Currencies:      currencies,
+		DefaultKeywords: defaultKeywords,
+		Platform:        runtime.GOOS,
+	}
 }
 
 // SetSettings saves new settings.
@@ -43,10 +50,16 @@ func (s *Service) SearchMore(ctx context.Context, query string) []Result {
 }
 
 // Translate returns a row with the query's translation, or none when the
-// query is not text to translate or translation is off. A newer query
-// cancels it through ctx.
-func (s *Service) Translate(ctx context.Context, query string) []Result {
-	return s.module.translate(ctx, query)
+// query is not text to translate or translation is off. always translates
+// any text, for the translate keyword. A newer query cancels it through ctx.
+func (s *Service) Translate(ctx context.Context, query string, always bool) []Result {
+	return s.module.translate(ctx, query, always)
+}
+
+// Files returns the files and folders whose name matches the query, for the
+// files keyword. A newer query cancels it through ctx.
+func (s *Service) Files(ctx context.Context, query string) []Result {
+	return s.module.searchFiles(ctx, query, maxFiles)
 }
 
 // Activate opens a result. reveal shows a file or folder in Finder or File

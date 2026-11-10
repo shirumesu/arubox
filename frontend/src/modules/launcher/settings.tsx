@@ -1,9 +1,12 @@
+import { Pencil, Plus, RotateCcw, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
 import { DashboardService } from "@bindings/core";
-import { Service, type Settings, type SettingsState } from "@bindings/modules/launcher";
+import { Service, type Keyword, type Settings, type SettingsState } from "@bindings/modules/launcher";
 import { KeepReadySelect, Row, Section } from "@/components/settings";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import type { Mutate, State } from "@/lib/dashboard";
@@ -19,11 +22,18 @@ export function LauncherSettingsPage({ state, mutate }: { state: State; mutate: 
 
   if (!status || !own) return null;
 
-  const save = (patch: Partial<Settings>) => {
-    Service.SetSettings({ ...own.settings, ...patch }).then(setOwn, (err: unknown) => {
-      toast.error(errorMessage(err));
-    });
-  };
+  /** Saves a change, resolving to whether it was accepted. */
+  const save = (patch: Partial<Settings>) =>
+    Service.SetSettings({ ...own.settings, ...patch }).then(
+      (next) => {
+        setOwn(next);
+        return true;
+      },
+      (err: unknown) => {
+        toast.error(errorMessage(err));
+        return false;
+      },
+    );
 
   return (
     <>
@@ -46,7 +56,7 @@ export function LauncherSettingsPage({ state, mutate }: { state: State; mutate: 
             <Switch
               checked={own.settings.files}
               onCheckedChange={(files) => {
-                save({ files });
+                void save({ files });
               }}
             />
           </Row>
@@ -58,7 +68,7 @@ export function LauncherSettingsPage({ state, mutate }: { state: State; mutate: 
           <Select
             value={own.settings.currency}
             onValueChange={(currency) => {
-              save({ currency });
+              void save({ currency });
             }}
           >
             <SelectTrigger size="sm" className="w-32">
@@ -75,6 +85,8 @@ export function LauncherSettingsPage({ state, mutate }: { state: State; mutate: 
         </Row>
       </Section>
 
+      <KeywordSettings own={own} save={save} />
+
       <Section title="面板">
         <Row
           title="隐藏后保持就绪"
@@ -83,11 +95,259 @@ export function LauncherSettingsPage({ state, mutate }: { state: State; mutate: 
           <KeepReadySelect
             minutes={own.settings.keepMinutes}
             onChange={(keepMinutes) => {
-              save({ keepMinutes });
+              void save({ keepMinutes });
             }}
           />
         </Row>
       </Section>
     </>
+  );
+}
+
+type Save = (patch: Partial<Settings>) => Promise<boolean>;
+
+/** The keywords: built-in ones, the default search and the websites. */
+function KeywordSettings({ own, save }: { own: SettingsState; save: Save }) {
+  const s = own.settings;
+  const sites = s.keywords ?? [];
+  // The row being edited: an index into sites, or -1 for a new one.
+  const [editing, setEditing] = useState<number | null>(null);
+
+  /** Saves the websites; the default search follows its keyword when renamed or removed. */
+  const saveSites = (next: Keyword[], from: string, to: string) => {
+    let defaultSearch = s.defaultSearch;
+    if (from !== "" && defaultSearch.toLowerCase() === from.toLowerCase()) defaultSearch = to;
+    return save({ keywords: next, defaultSearch });
+  };
+
+  // The user's own websites stay; the ones the launcher came with come back as they were.
+  const restore = () => {
+    const defaults = own.defaultKeywords ?? [];
+    const words = new Set(defaults.map((k) => k.keyword.toLowerCase()));
+    setEditing(null);
+    void save({
+      keywords: [...defaults, ...sites.filter((k) => !words.has(k.keyword.toLowerCase()))],
+      defaultSearch: s.defaultSearch || "gg",
+    });
+  };
+
+  return (
+    <>
+      <Section title="关键词">
+        <Row title="默认搜索" description="任何输入的最后一行都提供用它搜索，回车在浏览器里打开。">
+          <Select
+            value={s.defaultSearch || "none"}
+            onValueChange={(v) => {
+              void save({ defaultSearch: v === "none" ? "" : v });
+            }}
+          >
+            <SelectTrigger size="sm" className="w-36">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="none">不提供</SelectItem>
+              {sites.map((k) => (
+                <SelectItem key={k.keyword} value={k.keyword}>
+                  {k.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </Row>
+        <Row
+          title="翻译"
+          description={`输入“${s.translateKeyword || "fy"} 文字”，总是把后面的内容翻译成目标语言。留空关闭。`}
+        >
+          <WordInput value={s.translateKeyword} onSave={(translateKeyword) => save({ translateKeyword })} />
+        </Row>
+        {own.platform === "darwin" && (
+          <Row
+            title="搜索文件"
+            description={`输入“${s.filesKeyword || "f"} 名称”，只列出文件和文件夹，最多 20 个；关掉上面的自动搜索文件时也能用。留空关闭。`}
+          >
+            <WordInput value={s.filesKeyword} onSave={(filesKeyword) => save({ filesKeyword })} />
+          </Row>
+        )}
+      </Section>
+
+      <Section title="网站">
+        <p className="px-4 pt-3 pb-1 text-[13px] text-muted-foreground">
+          在启动器里输入关键词和空格，关键词变成标签，再输入内容、回车，就在默认浏览器里搜索；不输入内容直接回车打开网站首页。
+        </p>
+        {sites.map((k, i) =>
+          editing === i ? (
+            <KeywordForm
+              key={k.keyword}
+              initial={k}
+              onCancel={() => {
+                setEditing(null);
+              }}
+              onSave={async (next) => {
+                if (
+                  await saveSites(
+                    sites.map((old, j) => (j === i ? next : old)),
+                    k.keyword,
+                    next.keyword,
+                  )
+                )
+                  setEditing(null);
+              }}
+            />
+          ) : (
+            <Row
+              key={k.keyword}
+              title={
+                <>
+                  {k.name}
+                  <span className="rounded bg-muted px-1.5 py-0.5 font-mono text-[11px] font-normal text-muted-foreground">
+                    {k.keyword}
+                  </span>
+                </>
+              }
+              description={<span className="block truncate font-mono text-[12px]">{k.url}</span>}
+            >
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                title="编辑"
+                aria-label={`编辑${k.name}`}
+                onClick={() => {
+                  setEditing(i);
+                }}
+              >
+                <Pencil />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                title="删除"
+                aria-label={`删除${k.name}`}
+                onClick={() => {
+                  setEditing(null);
+                  void saveSites(
+                    sites.filter((_, j) => j !== i),
+                    k.keyword,
+                    "",
+                  );
+                }}
+              >
+                <Trash2 />
+              </Button>
+            </Row>
+          ),
+        )}
+        {editing === -1 ? (
+          <KeywordForm
+            initial={{ keyword: "", name: "", url: "" }}
+            onCancel={() => {
+              setEditing(null);
+            }}
+            onSave={async (next) => {
+              if (await saveSites([...sites, next], "", "")) setEditing(null);
+            }}
+          />
+        ) : (
+          <div className="flex items-center gap-2 px-4 py-2.5">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                setEditing(-1);
+              }}
+            >
+              <Plus />
+              添加网站
+            </Button>
+            <span className="flex-1" />
+            <Button variant="ghost" size="sm" title="自己添加的网站会保留" onClick={restore}>
+              <RotateCcw />
+              恢复默认网站
+            </Button>
+          </div>
+        )}
+      </Section>
+    </>
+  );
+}
+
+/** Edits a website keyword. Enter saves, Esc cancels. */
+function KeywordForm({
+  initial,
+  onSave,
+  onCancel,
+}: {
+  initial: Keyword;
+  onSave: (k: Keyword) => Promise<void>;
+  onCancel: () => void;
+}) {
+  const [k, setK] = useState(initial);
+  const field = (name: keyof Keyword, label: string, placeholder: string, className: string) => (
+    <label className={className}>
+      <span className="mb-1 block text-[12px] text-muted-foreground">{label}</span>
+      <Input
+        value={k[name]}
+        placeholder={placeholder}
+        spellCheck={false}
+        autoComplete="off"
+        onChange={(e) => {
+          setK({ ...k, [name]: e.target.value });
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") void onSave(k);
+          else if (e.key === "Escape") onCancel();
+        }}
+        className="h-8 text-[13px]"
+      />
+    </label>
+  );
+  return (
+    <div className="space-y-3 bg-muted/30 px-4 py-3">
+      <div className="flex gap-2">
+        {field("name", "名称", "Google", "w-40")}
+        {field("keyword", "关键词", "gg", "w-32")}
+      </div>
+      {field(
+        "url",
+        "搜索网址，用 {query} 标出搜索内容的位置",
+        "https://www.google.com/search?q={query}",
+        "block",
+      )}
+      <div className="flex justify-end gap-2">
+        <Button variant="ghost" size="sm" onClick={onCancel}>
+          取消
+        </Button>
+        <Button size="sm" onClick={() => void onSave(k)}>
+          保存
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+/** Edits a one-word keyword, saving it when the field loses focus or Enter is pressed. */
+function WordInput({ value, onSave }: { value: string; onSave: (word: string) => Promise<boolean> }) {
+  const [draft, setDraft] = useState(value);
+  const commit = () => {
+    const word = draft.trim();
+    if (word === value) return;
+    void onSave(word).then((ok) => {
+      if (!ok) setDraft(value);
+    });
+  };
+  return (
+    <Input
+      value={draft}
+      placeholder="已关闭"
+      spellCheck={false}
+      autoComplete="off"
+      onChange={(e) => {
+        setDraft(e.target.value);
+      }}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") e.currentTarget.blur();
+      }}
+      className="h-8 w-24 font-mono text-xs"
+    />
   );
 }

@@ -19,16 +19,18 @@ const (
 	kindTime        = "time"
 	kindTranslation = "translation"
 	kindCommand     = "command"
+	kindWeb         = "web"
 )
 
 // Result is one row of the launcher.
 type Result struct {
 	// Kind is "app", "file", "folder", "calc", "currency", "time",
-	// "translation" or "command". Calculations, conversions and times copy
-	// their Key, translations their Title.
+	// "translation", "command" or "web". Calculations, conversions and times
+	// copy their Key, translations their Title.
 	Kind string `json:"kind"`
 	// Key is what the result acts on: an app ID, a path, a calculated value,
-	// the text a translation is of, or a command.
+	// the text a translation is of, a command, or the keyword of a web
+	// search, whose Title is the query.
 	Key      string `json:"key"`
 	Title    string `json:"title"`
 	Subtitle string `json:"subtitle"`

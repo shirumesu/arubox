@@ -42,6 +42,17 @@ type Settings struct {
 	// KeepMinutes is how long the hidden panel is kept ready before its
 	// memory is released. 0 keeps it for good.
 	KeepMinutes int `json:"keepMinutes"`
+	// Keywords search websites: "gg cats" searches Google for cats.
+	Keywords []Keyword `json:"keywords"`
+	// DefaultSearch is the keyword offered last for any query, or empty
+	// for none.
+	DefaultSearch string `json:"defaultSearch"`
+	// TranslateKeyword translates what follows it, whatever it looks like.
+	// Empty turns it off.
+	TranslateKeyword string `json:"translateKeyword"`
+	// FilesKeyword searches only files and folders, even with Files off.
+	// Empty turns it off.
+	FilesKeyword string `json:"filesKeyword"`
 }
 
 // stored is what the module keeps in the settings file: the settings and
@@ -52,7 +63,15 @@ type stored struct {
 }
 
 func defaultStored() stored {
-	return stored{Settings: Settings{Files: true, Currency: "CNY", KeepMinutes: 30}}
+	return stored{Settings: Settings{
+		Files:            true,
+		Currency:         "CNY",
+		KeepMinutes:      30,
+		Keywords:         slices.Clone(defaultKeywords),
+		DefaultSearch:    "gg",
+		TranslateKeyword: "fy",
+		FilesKeyword:     "f",
+	}}
 }
 
 const (
@@ -66,6 +85,8 @@ const (
 	fileCandidates = 400
 	// maxIcons bounds the icon cache; files and folders can add many.
 	maxIcons = 1000
+	// maxFiles is how many files the files keyword lists.
+	maxFiles = 20
 )
 
 // Module is the launcher module.
@@ -104,7 +125,7 @@ func (m *Module) Info() module.Info {
 	return module.Info{
 		ID:          id,
 		Name:        "启动器",
-		Description: "搜索并打开应用和文件，翻译文字，计算算式、换算汇率、查看世界时间，用 ! 开头运行命令。",
+		Description: "搜索并打开应用和文件，用关键词搜索网站，翻译文字，计算算式、换算汇率、查看世界时间，用 ! 开头运行命令。",
 		Platforms:   []string{"darwin", "windows"},
 	}
 }
@@ -276,14 +297,18 @@ func (m *Module) searchMore(ctx context.Context, query string) []Result {
 		}
 	}
 	if s.Files && len([]rune(q)) >= 2 {
-		results = append(results, m.searchFiles(ctx, q)...)
+		results = append(results, m.searchFiles(ctx, q, maxResults)...)
 	}
 	return results
 }
 
-// searchFiles returns the files and folders whose name matches the query,
-// recently opened ones first.
-func (m *Module) searchFiles(ctx context.Context, q string) []Result {
+// searchFiles returns up to n files and folders whose name matches the
+// query, recently opened ones first.
+func (m *Module) searchFiles(ctx context.Context, q string, n int) []Result {
+	q = strings.TrimSpace(q)
+	if q == "" {
+		return nil
+	}
 	now := time.Now()
 	var matches []scored
 	for _, f := range platform.SearchFiles(q, fileCandidates) {
@@ -296,7 +321,7 @@ func (m *Module) searchFiles(ctx context.Context, q string) []Result {
 	if ctx.Err() != nil {
 		return nil
 	}
-	results := best(matches, maxResults)
+	results := best(matches, n)
 	for i := range results {
 		r := &results[i]
 		key := strings.ToLower(filepath.Ext(r.Key))
@@ -326,7 +351,7 @@ func displayDir(path string) string {
 // activate opens a result: launches the app, opens the file or folder (or
 // shows it in Finder or File Explorer when reveal is set), copies the value
 // or the translation (or opens the translation popup when reveal is set) or
-// runs the command. The panel hides first.
+// runs the command, or searches the web. The panel hides first.
 func (m *Module) activate(r Result, reveal bool) error {
 	if p := m.currentPanel(); p != nil {
 		p.close()
@@ -357,8 +382,23 @@ func (m *Module) activate(r Result, reveal bool) error {
 		return m.copy(r.Title)
 	case kindCommand:
 		return platform.RunInTerminal(r.Key)
+	case kindWeb:
+		return m.searchWeb(r.Key, r.Title)
 	}
 	return errors.New("未知的结果")
+}
+
+// searchWeb searches the website of a keyword for query in the default
+// browser.
+func (m *Module) searchWeb(keyword, query string) error {
+	m.mu.Lock()
+	app, keywords := m.app, m.stored.Keywords
+	m.mu.Unlock()
+	i := slices.IndexFunc(keywords, func(k Keyword) bool { return strings.EqualFold(k.Keyword, keyword) })
+	if i < 0 || app == nil {
+		return errors.New("关键词“" + keyword + "”已不存在")
+	}
+	return app.Browser.OpenURL(keywords[i].searchURL(query))
 }
 
 func (m *Module) copy(text string) error {
@@ -401,6 +441,15 @@ func (m *Module) setSettings(s Settings) error {
 	}
 	if !slices.Contains(currencies, s.Currency) {
 		return errors.New("不支持这种货币")
+	}
+	s.TranslateKeyword = strings.TrimSpace(s.TranslateKeyword)
+	s.FilesKeyword = strings.TrimSpace(s.FilesKeyword)
+	s.Keywords = slices.Clone(s.Keywords)
+	for i, k := range s.Keywords {
+		s.Keywords[i] = Keyword{Keyword: strings.TrimSpace(k.Keyword), Name: strings.TrimSpace(k.Name), URL: strings.TrimSpace(k.URL)}
+	}
+	if err := checkKeywords(s); err != nil {
+		return err
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()

@@ -160,3 +160,47 @@ func TestWantsTranslation(t *testing.T) {
 		}
 	}
 }
+
+func TestSearchURL(t *testing.T) {
+	maps := Keyword{URL: "https://www.google.com/maps/search/{query}"}
+	google := Keyword{URL: "https://www.google.com/search?q={query}"}
+	for _, c := range []struct {
+		k     Keyword
+		query string
+		want  string
+	}{
+		{google, "hi there", "https://www.google.com/search?q=hi%20there"},
+		{google, "c++ & go", "https://www.google.com/search?q=c%2B%2B%20%26%20go"},
+		{google, "猫", "https://www.google.com/search?q=%E7%8C%AB"},
+		{maps, "new york", "https://www.google.com/maps/search/new%20york"},
+		{google, " ", "https://www.google.com"},
+	} {
+		if got := c.k.searchURL(c.query); got != c.want {
+			t.Errorf("searchURL(%q) = %q, want %q", c.query, got, c.want)
+		}
+	}
+}
+
+func TestCheckKeywords(t *testing.T) {
+	if err := checkKeywords(defaultStored().Settings); err != nil {
+		t.Fatalf("defaults: %v", err)
+	}
+	web := func(word, url string) Settings {
+		s := defaultStored().Settings
+		s.Keywords = append(s.Keywords, Keyword{Keyword: word, Name: "X", URL: url})
+		return s
+	}
+	for name, s := range map[string]Settings{
+		"space":     web("a b", "https://x.com/?q={query}"),
+		"duplicate": web("GG", "https://x.com/?q={query}"),
+		"builtin":   web("fy", "https://x.com/?q={query}"),
+		"command":   web("!x", "https://x.com/?q={query}"),
+		"scheme":    web("x", "ftp://x.com/{query}"),
+		"no query":  web("x", "https://x.com/"),
+		"default":   {Keywords: nil, DefaultSearch: "gg"},
+	} {
+		if checkKeywords(s) == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}
