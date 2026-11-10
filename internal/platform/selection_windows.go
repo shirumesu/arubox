@@ -11,6 +11,8 @@ import (
 var (
 	ole32                = windows.NewLazySystemDLL("ole32.dll")
 	oleaut32             = windows.NewLazySystemDLL("oleaut32.dll")
+	procCoInitializeEx   = ole32.NewProc("CoInitializeEx")
+	procCoUninitialize   = ole32.NewProc("CoUninitialize")
 	procCoCreateInstance = ole32.NewProc("CoCreateInstance")
 	procSysStringLen     = oleaut32.NewProc("SysStringLen")
 	procSysFreeString    = oleaut32.NewProc("SysFreeString")
@@ -27,6 +29,8 @@ const uiaTextPatternID = 10014
 // Method slots in the COM interfaces' virtual tables (UIAutomationClient.h).
 const (
 	slotGetFocusedElement    = 8  // IUIAutomation
+	slotControlViewWalker    = 14 // IUIAutomation
+	slotGetParentElement     = 3  // IUIAutomationTreeWalker
 	slotGetCurrentPatternAs  = 14 // IUIAutomationElement
 	slotGetSelection         = 5  // IUIAutomationTextPattern
 	slotRangeArrayLength     = 3  // IUIAutomationTextRangeArray
@@ -34,7 +38,13 @@ const (
 	slotTextRangeGetText     = 12 // IUIAutomationTextRange
 	clsctxInprocServer       = 1
 	coinitMultithreaded      = 0
+	rpcEChangedMode          = 0x80010106
 )
+
+// maxSelectionAncestors is how far up from the focused element the selection
+// is looked for. In Chromium a focusable element inside a page can take the
+// focus while the page's document, a few levels up, owns the selection.
+const maxSelectionAncestors = 10
 
 // SelectedText returns the text selected in the frontmost program, or "" when
 // nothing is selected. It asks UI Automation first and falls back to a
@@ -49,10 +59,14 @@ func SelectedText() (string, error) {
 func uiaSelectedText() string {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
-	if err := windows.CoInitializeEx(0, coinitMultithreaded); err != nil {
+	// COM may already be set up on this thread: S_FALSE still has to be
+	// balanced, and a single-threaded setup works for UI Automation too.
+	switch hr, _, _ := procCoInitializeEx.Call(0, coinitMultithreaded); {
+	case succeeded(hr):
+		defer procCoUninitialize.Call()
+	case hr != rpcEChangedMode:
 		return ""
 	}
-	defer windows.CoUninitialize()
 
 	var automation comObject
 	hr, _, _ := procCoCreateInstance.Call(
@@ -63,12 +77,35 @@ func uiaSelectedText() string {
 	}
 	defer release(automation)
 
+	var walker comObject
+	if !succeeded(call(automation, slotControlViewWalker, uintptr(unsafe.Pointer(&walker)))) || walker == nil {
+		return ""
+	}
+	defer release(walker)
+
 	var element comObject
 	if !succeeded(call(automation, slotGetFocusedElement, uintptr(unsafe.Pointer(&element)))) || element == nil {
 		return ""
 	}
-	defer release(element)
+	for range maxSelectionAncestors + 1 {
+		if text := elementSelection(element); text != "" {
+			release(element)
+			return text
+		}
+		var parent comObject
+		ok := succeeded(call(walker, slotGetParentElement, uintptr(element), uintptr(unsafe.Pointer(&parent))))
+		release(element)
+		if !ok || parent == nil {
+			return ""
+		}
+		element = parent
+	}
+	release(element)
+	return ""
+}
 
+// elementSelection returns the text selected in element, if it has text.
+func elementSelection(element comObject) string {
 	var pattern comObject
 	if !succeeded(call(element, slotGetCurrentPatternAs, uiaTextPatternID,
 		uintptr(unsafe.Pointer(&iidIUIAutomationTextPatt)), uintptr(unsafe.Pointer(&pattern)))) || pattern == nil {
@@ -103,7 +140,33 @@ func uiaSelectedText() string {
 	return windows.UTF16ToString(text)
 }
 
+// The copy keys are tried in turn: Ctrl+Insert first, which terminals copy
+// with where Ctrl+C would interrupt, then Ctrl+C for programs that only
+// know that. Each gets this long to answer; one that has nothing selected
+// leaves the clipboard alone.
+var copyKeys = []struct {
+	vk       uint16
+	extended bool
+	wait     time.Duration
+}{
+	{vkInsert, true, 100 * time.Millisecond},
+	{vkC, false, 300 * time.Millisecond},
+}
+
+const (
+	// copySettle lets a program finish writing: some put several formats
+	// on the clipboard one after another.
+	copySettle = 10 * time.Millisecond
+	// copyLate is how long a copy that has no text yet may still add it.
+	copyLate = 200 * time.Millisecond
+)
+
 func copySelection() string {
+	// The hotkey's keys are still held when it fires. The copy is sent once
+	// they are let go, so the program sees a plain copy.
+	maskModifierRelease()
+	waitForKeysUp()
+
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	// The clipboard can only be written back by a window that owns it.
@@ -113,26 +176,48 @@ func copySelection() string {
 	}
 	defer procDestroyWindow.Call(owner)
 
-	saved, ok := saveClipboard(owner)
+	// The clipboard is emptied, so whatever lands on it is the copy.
+	saved, ok := takeClipboard(owner)
 	if !ok {
 		return ""
 	}
-	before, _, _ := procGetClipboardSequenceNumber.Call()
-	pressCopy()
-	// Programs answer a copy within a few milliseconds; one that has nothing
-	// selected leaves the clipboard alone.
-	deadline := time.Now().Add(300 * time.Millisecond)
-	changed := func() bool {
-		n, _, _ := procGetClipboardSequenceNumber.Call()
-		return n != before
+	defer restoreClipboard(owner, unmonitored(saved))
+	for _, k := range copyKeys {
+		before, _, _ := procGetClipboardSequenceNumber.Call()
+		pressCopy(k.vk, k.extended)
+		if text, copied := awaitCopy(owner, uint32(before), k.wait); copied {
+			return text
+		}
 	}
-	for !changed() && time.Now().Before(deadline) {
+	return ""
+}
+
+// awaitCopy waits for the clipboard to change from sequence number before
+// and returns its text. copied is false when it did not change in time.
+func awaitCopy(owner uintptr, before uint32, wait time.Duration) (text string, copied bool) {
+	sequence := func() uint32 {
+		n, _, _ := procGetClipboardSequenceNumber.Call()
+		return uint32(n)
+	}
+	deadline := time.Now().Add(wait)
+	for sequence() == before {
+		if time.Now().After(deadline) {
+			return "", false
+		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	if !changed() {
-		return ""
+	deadline = time.Now().Add(copyLate)
+	for {
+		time.Sleep(copySettle)
+		seen := sequence()
+		if text := clipboardText(owner); text != "" {
+			return text, true
+		}
+		for sequence() == seen {
+			if time.Now().After(deadline) {
+				return "", true
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
 	}
-	text := clipboardText(owner)
-	restoreClipboard(owner, saved)
-	return text
 }

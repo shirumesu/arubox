@@ -68,11 +68,13 @@ func openClipboard(owner uintptr) bool {
 	return false
 }
 
-func saveClipboard(owner uintptr) ([]clipboardItem, bool) {
+// takeClipboard returns the clipboard's contents and empties it.
+func takeClipboard(owner uintptr) ([]clipboardItem, bool) {
 	if !openClipboard(owner) {
 		return nil, false
 	}
 	defer procCloseClipboard.Call()
+	defer procEmptyClipboard.Call()
 	var items []clipboardItem
 	format := uintptr(0)
 	for {
@@ -133,6 +135,17 @@ func restoreClipboard(owner uintptr, items []clipboardItem) bool {
 		}
 	}
 	return true
+}
+
+// unmonitored adds the format that tells clipboard history and clipboard
+// tools to skip this content, for putting the clipboard back as it was.
+func unmonitored(items []clipboardItem) []clipboardItem {
+	name, _ := windows.UTF16PtrFromString("ExcludeClipboardContentFromMonitorProcessing")
+	format, _, _ := procRegisterClipboardFormatW.Call(uintptr(unsafe.Pointer(name)))
+	if format == 0 {
+		return items
+	}
+	return append(items, clipboardItem{format: uint32(format)})
 }
 
 func clipboardText(owner uintptr) string {
