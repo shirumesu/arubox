@@ -2,6 +2,7 @@ import { Events } from "@wailsio/runtime";
 import { useEffect, useLayoutEffect, useState, type PointerEvent } from "react";
 
 import { Service, type Frame } from "@bindings/modules/translate";
+import { FrozenScreen, loadFrozenScreen } from "@/components/frozen-screen";
 
 interface Drag {
   x0: number;
@@ -10,10 +11,10 @@ interface Drag {
   y1: number;
 }
 
-/** A frozen screen whose picture has been decoded. */
+/** A frozen screen whose picture has been loaded. */
 interface Shown {
   seq: number;
-  url: string;
+  canvas: HTMLCanvasElement;
 }
 
 /** Drags shorter than this on either side are taken as stray clicks. */
@@ -41,22 +42,11 @@ export function Capture() {
     let latest = 0;
     const load = (frame: Frame) => {
       latest = frame.seq;
-      fetch(`/translate/capture.bmp?seq=${String(frame.seq)}`)
-        .then((response) => {
-          if (!response.ok) throw new Error(`capture ${String(response.status)}`);
-          return response.blob();
-        })
-        .then(async (blob) => {
-          const url = URL.createObjectURL(blob);
-          const image = new Image();
-          image.src = url;
-          await image.decode();
-          if (frame.seq !== latest) {
-            URL.revokeObjectURL(url);
-            return;
-          }
+      loadFrozenScreen(`/translate/capture?seq=${String(frame.seq)}`, frame.picture)
+        .then((canvas) => {
+          if (frame.seq !== latest) return;
           setDrag(null);
-          setShown({ seq: frame.seq, url });
+          setShown({ seq: frame.seq, canvas });
         })
         .catch((err: unknown) => {
           console.error(err);
@@ -80,13 +70,6 @@ export function Capture() {
       offEnd();
     };
   }, []);
-
-  useEffect(() => {
-    if (!shown) return;
-    return () => {
-      URL.revokeObjectURL(shown.url);
-    };
-  }, [shown]);
 
   useLayoutEffect(() => {
     if (shown) void Service.PresentCapture(shown.seq);
@@ -148,7 +131,7 @@ export function Capture() {
       }}
       className="relative h-full cursor-crosshair overflow-hidden"
     >
-      <img src={shown.url} alt="" draggable={false} className="absolute inset-0 size-full" />
+      <FrozenScreen canvas={shown.canvas} />
       {selected ? (
         <>
           <div

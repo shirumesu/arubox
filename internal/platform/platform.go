@@ -4,7 +4,6 @@
 package platform
 
 import (
-	"encoding/binary"
 	"errors"
 	"net/http"
 	"strconv"
@@ -72,26 +71,44 @@ func (img Image) Crop(x, y, width, height int) Image {
 	return out
 }
 
-// ServeBMP writes img as an uncompressed bitmap: its BGRA rows go out as they
-// are, without spending time on compression.
-func (img Image) ServeBMP(w http.ResponseWriter) {
-	const fileHeader, infoHeader = 14, 40
-	header := make([]byte, fileHeader+infoHeader)
-	size := len(img.Pixels)
-	copy(header, "BM")
-	// Screen sizes are far from overflowing these fields.
-	binary.LittleEndian.PutUint32(header[2:], uint32(fileHeader+infoHeader+size))
-	binary.LittleEndian.PutUint32(header[10:], fileHeader+infoHeader)
-	binary.LittleEndian.PutUint32(header[14:], infoHeader)
-	binary.LittleEndian.PutUint32(header[18:], uint32(img.Width))
-	// A negative height stores the rows top-down.
-	binary.LittleEndian.PutUint32(header[22:], uint32(-int32(img.Height)))
-	binary.LittleEndian.PutUint16(header[26:], 1)
-	binary.LittleEndian.PutUint16(header[28:], 32)
-	w.Header().Set("Content-Type", "image/bmp")
-	w.Header().Set("Content-Length", strconv.Itoa(len(header)+size))
-	_, _ = w.Write(header)
-	_, _ = w.Write(img.Pixels)
+// Strips is how many horizontal strips a frozen screen goes to a page in.
+// The page fetches them all at once, and WebView2 hands several responses
+// over side by side: eight strips arrive in about half the time of one
+// response of the whole picture.
+const Strips = 8
+
+// Picture tells a page the size of a frozen screen it loads in strips.
+type Picture struct {
+	// Width and Height are in pixels.
+	Width  int `json:"width"`
+	Height int `json:"height"`
+	Strips int `json:"strips"`
+}
+
+// Picture describes img for loading it in strips.
+func (img Image) Picture() Picture {
+	return Picture{Width: img.Width, Height: img.Height, Strips: Strips}
+}
+
+// ServeStrip writes strip part of img's Strips as RGBA rows, which the page
+// puts on a canvas as they are, without decoding an image file. A strip
+// holds the picture's height divided by Strips, rounded up, so the last one
+// may be shorter.
+func (img Image) ServeStrip(w http.ResponseWriter, r *http.Request, part int) {
+	rows := (img.Height + Strips - 1) / Strips
+	y0, y1 := part*rows, min((part+1)*rows, img.Height)
+	if part < 0 || y0 >= y1 {
+		http.NotFound(w, r)
+		return
+	}
+	src := img.Pixels[y0*img.Width*4 : y1*img.Width*4]
+	out := make([]byte, len(src))
+	for i := 0; i < len(src); i += 4 {
+		out[i], out[i+1], out[i+2], out[i+3] = src[i+2], src[i+1], src[i], 255
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Length", strconv.Itoa(len(out)))
+	_, _ = w.Write(out)
 }
 
 // KeyPress is a key going down or up while CaptureKeys holds the keyboard.

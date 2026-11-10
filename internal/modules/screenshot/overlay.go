@@ -17,8 +17,9 @@ type Start struct {
 	Seq int `json:"seq"`
 	// Width and Height are the screen's size in points. The picture has
 	// the screen's pixels, so it is larger on high-density screens.
-	Width  int `json:"width"`
-	Height int `json:"height"`
+	Width   int              `json:"width"`
+	Height  int              `json:"height"`
+	Picture platform.Picture `json:"picture"`
 	// Windows are the bounds of the windows on the screen, front to back,
 	// relative to the screen, for picking one with a click.
 	Windows []application.Rect `json:"windows"`

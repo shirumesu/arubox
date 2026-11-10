@@ -93,12 +93,18 @@ func (m *Module) Hotkeys() []hotkey.Def {
 	}
 }
 
-// Enable loads the popup in the background so it opens without delay.
+// Enable loads the popup and the capture window in the background so they
+// open without delay.
 func (m *Module) Enable(ctx module.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.popup = newPopup(ctx.App, m.keepTime)
-	m.capture = &capture{app: ctx.App, keep: m.keepTime}
+	c := &capture{app: ctx.App, keep: m.keepTime}
+	c.mu.Lock()
+	c.create()
+	c.mu.Unlock()
+	m.capture = c
+	go platform.PrepareScreenCapture()
 	return nil
 }
 

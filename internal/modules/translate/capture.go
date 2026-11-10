@@ -2,6 +2,7 @@ package translate
 
 import (
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -15,16 +16,18 @@ import (
 type Frame struct {
 	// Seq numbers captures; the page passes it back so a late call about an
 	// older capture is ignored.
-	Seq int `json:"seq"`
+	Seq     int              `json:"seq"`
+	Picture platform.Picture `json:"picture"`
 }
 
 const (
 	frameEvent    = "translate:capture"
 	frameEndEvent = "translate:capture-end"
-	// frameRoute is where the capture page loads the frozen screen from, as
-	// /translate/capture.bmp. Wails strips the route before serving.
+	// frameRoute is where the capture page loads the frozen screen from, a
+	// strip at a time as /translate/capture?part=N. Wails strips the route
+	// before serving.
 	frameRoute = "/translate/"
-	framePath  = "capture.bmp"
+	framePath  = "capture"
 )
 
 func init() {
@@ -34,9 +37,10 @@ func init() {
 
 // capture is the window laid over the screen under the mouse with a frozen
 // picture of it, where the user drags out the area to translate. The text
-// is read from that picture, so it is what the user saw. It is created on
-// first use and hidden rather than closed, like the popup, and released
-// after it has stayed hidden for the time the user chose.
+// is read from that picture, so it is what the user saw. Like the popup, it
+// is loaded when the module is enabled and hidden rather than closed, since
+// a window that has just loaded shows its first frames only after a second;
+// it is released after it has stayed hidden for the time the user chose.
 type capture struct {
 	app  *application.App
 	keep func() time.Duration
@@ -116,7 +120,7 @@ func (c *capture) start() error {
 		c.create()
 	}
 	platform.SetWindowFrame(c.win, screen)
-	frame := Frame{Seq: c.seq}
+	frame := Frame{Seq: c.seq, Picture: img.Picture()}
 	if !c.ready {
 		c.pending = &frame
 		return nil
@@ -227,9 +231,10 @@ func (h frames) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	img, ok := c.picture()
-	if !ok {
-		http.Error(w, "no capture", http.StatusNotFound)
+	part, err := strconv.Atoi(r.URL.Query().Get("part"))
+	if !ok || err != nil {
+		http.NotFound(w, r)
 		return
 	}
-	img.ServeBMP(w)
+	img.ServeStrip(w, r, part)
 }

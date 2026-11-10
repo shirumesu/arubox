@@ -87,7 +87,7 @@ const mosaicBlock = 8;
  * Draws a shape on a context whose units are points. img is the capture,
  * drawn at the screen's size in points, which mosaics pixelate.
  */
-export function drawShape(ctx: CanvasRenderingContext2D, s: Shape, img: HTMLImageElement, screen: Box) {
+export function drawShape(ctx: CanvasRenderingContext2D, s: Shape, img: HTMLCanvasElement, screen: Box) {
   ctx.save();
   if (s.kind === "text") {
     ctx.fillStyle = s.color;
@@ -152,9 +152,9 @@ function drawArrow(ctx: CanvasRenderingContext2D, from: Point, to: Point, width:
 }
 
 /** Pixelates the capture inside b by drawing it small, then large without smoothing. */
-function drawMosaic(ctx: CanvasRenderingContext2D, img: HTMLImageElement, b: Box, screen: Box) {
+function drawMosaic(ctx: CanvasRenderingContext2D, img: HTMLCanvasElement, b: Box, screen: Box) {
   if (b.w < 1 || b.h < 1) return;
-  const scale = img.naturalWidth / screen.w;
+  const scale = img.width / screen.w;
   const cols = Math.max(1, Math.round(b.w / mosaicBlock));
   const rows = Math.max(1, Math.round(b.h / mosaicBlock));
   const small = document.createElement("canvas");
@@ -172,12 +172,12 @@ function drawMosaic(ctx: CanvasRenderingContext2D, img: HTMLImageElement, b: Box
  * resolution, as a PNG in base64.
  */
 export async function renderSelection(
-  img: HTMLImageElement,
+  img: HTMLCanvasElement,
   screen: Box,
   sel: Box,
   shapes: Shape[],
 ): Promise<string> {
-  const scale = img.naturalWidth / screen.w;
+  const scale = img.width / screen.w;
   const canvas = document.createElement("canvas");
   canvas.width = Math.max(1, Math.round(sel.w * scale));
   canvas.height = Math.max(1, Math.round(sel.h * scale));

@@ -125,6 +125,7 @@ func (m *Module) Enable(ctx module.Context) error {
 	m.app = ctx.App
 	m.pins.app = ctx.App
 	m.overlay = newOverlay(ctx.App, m.keepTime, m.dropImage)
+	go platform.PrepareScreenCapture()
 	return nil
 }
 
@@ -179,6 +180,7 @@ func (m *Module) capture() {
 	start := Start{
 		Width:     screen.Width,
 		Height:    screen.Height,
+		Picture:   img.Picture(),
 		Windows:   windowsOn(screen, platform.OnScreenWindows()),
 		Translate: m.translator != nil && m.translator.Available(),
 	}

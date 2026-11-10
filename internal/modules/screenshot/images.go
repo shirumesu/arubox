@@ -6,8 +6,9 @@ import (
 	"strings"
 )
 
-// imageRoute is where the pages load pictures from: /screenshot/capture.bmp
-// is the current capture, /screenshot/pin/<id>.png a pinned picture.
+// imageRoute is where the pages load pictures from: /screenshot/capture?part=N
+// is a strip of the current capture, /screenshot/pin/<id>.png a pinned
+// picture.
 const imageRoute = "/screenshot/"
 
 // images serves the pictures to the pages, so they never travel as text
@@ -19,13 +20,14 @@ type images struct {
 func (h images) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, imageRoute)
 	w.Header().Set("Cache-Control", "no-store")
-	if path == "capture.bmp" {
+	if path == "capture" {
 		img, ok := h.module.currentImage()
-		if !ok {
-			http.Error(w, "no capture", http.StatusNotFound)
+		part, err := strconv.Atoi(r.URL.Query().Get("part"))
+		if !ok || err != nil {
+			http.NotFound(w, r)
 			return
 		}
-		img.ServeBMP(w)
+		img.ServeStrip(w, r, part)
 		return
 	}
 	if id, ok := strings.CutPrefix(path, "pin/"); ok {

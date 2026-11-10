@@ -31,6 +31,7 @@ import {
 } from "react";
 
 import { Service, type Start } from "@bindings/modules/screenshot";
+import { FrozenScreen, loadFrozenScreen } from "@/components/frozen-screen";
 import { Button } from "@/components/ui/button";
 import { errorMessage } from "@/lib/errors";
 import {
@@ -60,7 +61,8 @@ type Drag =
 
 interface Capture {
   start: Start;
-  image: HTMLImageElement;
+  /** The frozen screen at its full resolution. */
+  image: HTMLCanvasElement;
   screen: Box;
   windows: Box[];
 }
@@ -117,10 +119,8 @@ export function Screenshot() {
     let latest = 0;
     const load = (start: Start) => {
       latest = start.seq;
-      const image = new Image();
-      image.src = `/screenshot/capture.bmp?seq=${String(start.seq)}`;
-      image.decode().then(
-        () => {
+      loadFrozenScreen(`/screenshot/capture?seq=${String(start.seq)}`, start.picture).then(
+        (image) => {
           if (start.seq !== latest) return;
           reset();
           setCapture({
@@ -386,7 +386,7 @@ export function Screenshot() {
   /** The selection in the capture's pixels, for reading its text. */
   const pixels = () => {
     if (!capture || !sel) return { x: 0, y: 0, w: 0, h: 0 };
-    const scale = capture.image.naturalWidth / capture.screen.w;
+    const scale = capture.image.width / capture.screen.w;
     return {
       x: Math.round(sel.x * scale),
       y: Math.round(sel.y * scale),
@@ -462,12 +462,12 @@ export function Screenshot() {
 
   if (!capture) return null;
   const { screen } = capture;
-  const scale = capture.image.naturalWidth / screen.w;
+  const scale = capture.image.width / screen.w;
   const shown = selecting ?? sel;
 
   return (
     <div className="relative h-full overflow-hidden select-none">
-      <img src={capture.image.src} alt="" draggable={false} className="absolute inset-0 size-full" />
+      <FrozenScreen canvas={capture.image} />
       <canvas ref={canvasRef} className="pointer-events-none absolute inset-0 size-full" />
       <div
         className="absolute inset-0"
