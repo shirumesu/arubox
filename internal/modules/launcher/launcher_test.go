@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
+
+	"github.com/shirumesu/arubox/internal/platform"
 )
 
 func TestScoreOrder(t *testing.T) {
@@ -141,6 +143,20 @@ func TestWorldTime(t *testing.T) {
 	for _, q := range []string{"la", "safari", "time", "rome"} {
 		if r, ok := worldTime(q, now); ok {
 			t.Errorf("%q answered %+v", q, r)
+		}
+	}
+}
+
+func TestWantsTranslation(t *testing.T) {
+	m := &Module{apps: []platform.App{{ID: "/Applications/Safari.app", Name: "Safari"}, {ID: "x", Name: "Visual Studio Code"}}}
+	for _, q := range []string{"hello world", "你好", "serendipity", "こんにちは", "Good morning!"} {
+		if !m.wantsTranslation(q) {
+			t.Errorf("%q: not translated", q)
+		}
+	}
+	for _, q := range []string{"saf", "studio", "1+2", "100 usd", "东京时间", "!ls", "hi", ""} {
+		if m.wantsTranslation(q) {
+			t.Errorf("%q: translated", q)
 		}
 	}
 }

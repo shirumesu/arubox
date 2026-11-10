@@ -70,10 +70,10 @@ const (
 
 // Module is the launcher module.
 type Module struct {
-	store Store
-	log   *slog.Logger
-
-	rates *rates
+	store      Store
+	log        *slog.Logger
+	rates      *rates
+	translator Translator
 
 	mu      sync.Mutex
 	stored  stored
@@ -84,8 +84,9 @@ type Module struct {
 	icons   map[string]string // data URLs by app ID, extension or folder
 }
 
-// New creates the module. It does nothing until enabled.
-func New(store Store, log *slog.Logger) *Module {
+// New creates the module. It does nothing until enabled. translator may be
+// nil, which leaves translation out.
+func New(store Store, log *slog.Logger, translator Translator) *Module {
 	s := defaultStored()
 	if err := store.ModuleSettings(id, &s); err != nil {
 		log.Warn("launcher settings unreadable, using defaults", "error", err)
@@ -95,7 +96,7 @@ func New(store Store, log *slog.Logger) *Module {
 		Timeout:   10 * time.Second,
 		Transport: &http.Transport{Proxy: platform.SystemProxy, ForceAttemptHTTP2: true},
 	}
-	return &Module{store: store, log: log, stored: s, rates: &rates{client: client}}
+	return &Module{store: store, log: log, stored: s, rates: &rates{client: client}, translator: translator}
 }
 
 // Info describes the module.
@@ -103,7 +104,7 @@ func (m *Module) Info() module.Info {
 	return module.Info{
 		ID:          id,
 		Name:        "启动器",
-		Description: "搜索并打开应用和文件，计算算式、换算汇率、查看世界时间，用 ! 开头运行命令。",
+		Description: "搜索并打开应用和文件，翻译文字，计算算式、换算汇率、查看世界时间，用 ! 开头运行命令。",
 		Platforms:   []string{"darwin", "windows"},
 	}
 }
@@ -323,8 +324,9 @@ func displayDir(path string) string {
 }
 
 // activate opens a result: launches the app, opens the file or folder (or
-// shows it in Finder or File Explorer when reveal is set), copies the
-// calculation or runs the command. The panel hides first.
+// shows it in Finder or File Explorer when reveal is set), copies the value
+// or the translation (or opens the translation popup when reveal is set) or
+// runs the command. The panel hides first.
 func (m *Module) activate(r Result, reveal bool) error {
 	if p := m.currentPanel(); p != nil {
 		p.close()
@@ -343,17 +345,30 @@ func (m *Module) activate(r Result, reveal bool) error {
 		if r.Key == "" {
 			return nil
 		}
-		m.mu.Lock()
-		app := m.app
-		m.mu.Unlock()
-		if app == nil || !app.Clipboard.SetText(r.Key) {
-			return errors.New("复制失败")
+		return m.copy(r.Key)
+	case kindTranslation:
+		if r.Key == "" {
+			return nil
 		}
-		return nil
+		if reveal {
+			m.translator.Open(r.Key)
+			return nil
+		}
+		return m.copy(r.Title)
 	case kindCommand:
 		return platform.RunInTerminal(r.Key)
 	}
 	return errors.New("未知的结果")
+}
+
+func (m *Module) copy(text string) error {
+	m.mu.Lock()
+	app := m.app
+	m.mu.Unlock()
+	if app == nil || !app.Clipboard.SetText(text) {
+		return errors.New("复制失败")
+	}
+	return nil
 }
 
 // countLaunch remembers that an app was opened.

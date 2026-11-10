@@ -42,8 +42,15 @@ func (s *Service) SearchMore(ctx context.Context, query string) []Result {
 	return s.module.searchMore(ctx, query)
 }
 
+// Translate returns a row with the query's translation, or none when the
+// query is not text to translate or translation is off. A newer query
+// cancels it through ctx.
+func (s *Service) Translate(ctx context.Context, query string) []Result {
+	return s.module.translate(ctx, query)
+}
+
 // Activate opens a result. reveal shows a file or folder in Finder or File
-// Explorer instead of opening it.
+// Explorer, or a translation in the translation popup, instead.
 func (s *Service) Activate(result Result, reveal bool) error {
 	return s.module.activate(result, reveal)
 }

@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -222,6 +223,31 @@ func (m *Module) setSettings(s Settings) error {
 	}
 	m.settings = s
 	return nil
+}
+
+// ErrDisabled is returned to other modules while translation is turned off.
+var ErrDisabled = errors.New("翻译模块未启用")
+
+// TranslateText translates text as the popup would, for other modules, and
+// names the engine that did it. It returns ErrDisabled while the module is
+// off.
+func (m *Module) TranslateText(ctx context.Context, text string) (Translation, string, error) {
+	if m.currentPopup() == nil {
+		return Translation{}, "", ErrDisabled
+	}
+	t, err := m.translate(ctx, strings.TrimSpace(text))
+	engine := "Google 翻译"
+	if m.currentSettings().Engine == engineDeepL {
+		engine = "DeepL"
+	}
+	return t, engine, err
+}
+
+// OpenText shows text, translated, in the popup.
+func (m *Module) OpenText(text string) {
+	if p := m.currentPopup(); p != nil {
+		p.open(Request{Text: text})
+	}
 }
 
 // engine translates text from one language into another.

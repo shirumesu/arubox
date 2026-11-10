@@ -1,17 +1,34 @@
 import { Clipboard, Events } from "@wailsio/runtime";
-import { Banknote, Calculator, Clock, Search, SquareTerminal, type LucideIcon } from "lucide-react";
+import {
+  Banknote,
+  Calculator,
+  Clock,
+  Languages,
+  Search,
+  SquareTerminal,
+  type LucideIcon,
+} from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
 
 import { Service, type Result } from "@bindings/modules/launcher";
+import { languageName } from "@/modules/translate/languages";
 import { cn } from "cn";
 
 /** Waits this long after typing stops before the slower search for files and rates. */
-const fileDelay = 120;
+const moreDelay = 120;
+/** Translates only once typing has paused, so a sentence is not sent word by word. */
+const translateDelay = 450;
+
+interface Delayed {
+  timer?: ReturnType<typeof setTimeout>;
+  call?: { cancel: () => unknown };
+}
 
 export function Launcher() {
   const [query, setQuery] = useState("");
   const [instant, setInstant] = useState<Result[]>([]);
-  const [files, setFiles] = useState<Result[]>([]);
+  const [more, setMore] = useState<Result[]>([]);
+  const [translation, setTranslation] = useState<Result[]>([]);
   const [selected, setSelected] = useState(0);
   const [mac, setMac] = useState(true);
   // Shows that a calculation was copied, until the next keystroke.
@@ -25,28 +42,42 @@ export function Launcher() {
   const heightReports = useRef(0);
   // Only the latest query's results may show.
   const searches = useRef(0);
-  const fileSearch = useRef<{ timer?: ReturnType<typeof setTimeout>; call?: { cancel: () => unknown } }>({});
+  const delayed = useRef<Delayed[]>([]);
 
-  const results = [...instant, ...files];
+  const results = [...instant, ...translation, ...more];
 
   const search = useCallback((q: string) => {
     const n = ++searches.current;
-    clearTimeout(fileSearch.current.timer);
-    fileSearch.current.call?.cancel();
-    fileSearch.current = {};
+    for (const d of delayed.current) {
+      clearTimeout(d.timer);
+      d.call?.cancel();
+    }
+    delayed.current = [];
     Service.Search(q).then((r) => {
       if (n !== searches.current) return;
       setInstant(r ?? []);
-      setFiles([]);
+      setMore([]);
+      setTranslation([]);
       setSelected(0);
     }, console.error);
-    fileSearch.current.timer = setTimeout(() => {
-      const call = Service.SearchMore(q);
-      fileSearch.current.call = call;
-      call.then((r) => {
-        if (n === searches.current) setFiles(r ?? []);
-      }, console.error);
-    }, fileDelay);
+    // The slower searches run once typing pauses, and a newer query cancels them.
+    const later = (
+      delay: number,
+      fetch: (q: string) => Promise<Result[] | null> & { cancel: () => unknown },
+      set: (r: Result[]) => void,
+    ) => {
+      const d: Delayed = {};
+      d.timer = setTimeout(() => {
+        const call = fetch(q);
+        d.call = call;
+        call.then((r) => {
+          if (n === searches.current) set(r ?? []);
+        }, console.error);
+      }, delay);
+      delayed.current.push(d);
+    };
+    later(moreDelay, Service.SearchMore, setMore);
+    later(translateDelay, Service.Translate, setTranslation);
   }, []);
 
   useEffect(() => {
@@ -115,7 +146,7 @@ export function Launcher() {
     const copy = (mac ? e.metaKey : e.ctrlKey) && e.key.toLowerCase() === "c";
     if (copy && current && copyable(current) && field.selectionStart === field.selectionEnd) {
       e.preventDefault();
-      Clipboard.SetText(current.key).then(() => {
+      Clipboard.SetText(copyText(current)).then(() => {
         setCopied(true);
       }, console.error);
       return;
@@ -189,6 +220,9 @@ export function Launcher() {
               {copyable(current) && <span>{copied ? "已复制" : mac ? "⌘C 复制" : "Ctrl+C 复制"}</span>}
               <span>↵ {actionName(current)}</span>
               {isPath && <span>{mac ? "⌘↵ 在访达中显示" : "Ctrl+↵ 在资源管理器中显示"}</span>}
+              {current.kind === "translation" && current.key !== "" && (
+                <span>{mac ? "⌘↵ 在翻译窗口中打开" : "Ctrl+↵ 在翻译窗口中打开"}</span>
+              )}
               <span className="flex-1" />
               <span>Esc {query ? "清空" : "关闭"}</span>
             </footer>
@@ -199,12 +233,22 @@ export function Launcher() {
   );
 }
 
-/** Calculations, conversions and times are values to copy. */
+/** Calculations, conversions, times and translations are values to copy. */
 function copyable(r: Result): boolean {
-  return (r.kind === "calc" || r.kind === "currency" || r.kind === "time") && r.key !== "";
+  return ["calc", "currency", "time", "translation"].includes(r.kind) && r.key !== "";
 }
 
-const kindIcons: Record<string, LucideIcon> = { calc: Calculator, currency: Banknote, time: Clock };
+/** A translation copies its translated text; the other values their key. */
+function copyText(r: Result): string {
+  return r.kind === "translation" ? r.title : r.key;
+}
+
+const kindIcons: Record<string, LucideIcon> = {
+  calc: Calculator,
+  currency: Banknote,
+  time: Clock,
+  translation: Languages,
+};
 
 function actionName(r: Result): string {
   if (copyable(r)) return "复制并关闭";
@@ -229,6 +273,7 @@ function Row({
   onClick: (reveal: boolean) => void;
   mac: boolean;
 }) {
+  const translation = result.kind === "translation" && result.key !== "";
   return (
     <button
       type="button"
@@ -237,14 +282,21 @@ function Row({
         onClick(mac ? e.metaKey : e.ctrlKey);
       }}
       className={cn(
-        "flex h-11 w-full items-center gap-3 rounded-md px-2.5 text-left outline-none",
+        "flex min-h-11 w-full items-center gap-3 rounded-md px-2.5 py-1.5 text-left outline-none",
         selected && "bg-accent text-accent-foreground",
       )}
     >
       <ResultIcon result={result} />
       <span className="min-w-0 flex-1">
-        <span className="block truncate text-[14px]">{result.title}</span>
-        <span className="block truncate text-[11px] text-muted-foreground">{result.subtitle}</span>
+        {/* A translation shows a few lines; other titles fit on one. */}
+        <span className={cn("block text-[14px]", translation ? "line-clamp-3" : "truncate")}>
+          {result.title}
+        </span>
+        <span className="block truncate text-[11px] text-muted-foreground">
+          {translation
+            ? `${languageName(result.source ?? "")} → ${languageName(result.target ?? "")} · ${result.subtitle}`
+            : result.subtitle}
+        </span>
       </span>
     </button>
   );

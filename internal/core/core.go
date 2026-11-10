@@ -65,9 +65,10 @@ func Run(assets fs.FS) error {
 	}
 
 	c := &Core{log: log, logDir: logDir}
+	translator := translate.New(store, log)
 	modules := []module.Module{
-		translate.New(store, log),
-		launcher.New(store, log),
+		translator,
+		launcher.New(store, log, launcherTranslator{translator}),
 	}
 	services := []application.Service{application.NewService(&DashboardService{core: c})}
 	for _, m := range modules {

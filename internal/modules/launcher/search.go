@@ -11,27 +11,32 @@ import (
 
 // The kinds of result.
 const (
-	kindApp      = "app"
-	kindFile     = "file"
-	kindFolder   = "folder"
-	kindCalc     = "calc"
-	kindCurrency = "currency"
-	kindTime     = "time"
-	kindCommand  = "command"
+	kindApp         = "app"
+	kindFile        = "file"
+	kindFolder      = "folder"
+	kindCalc        = "calc"
+	kindCurrency    = "currency"
+	kindTime        = "time"
+	kindTranslation = "translation"
+	kindCommand     = "command"
 )
 
 // Result is one row of the launcher.
 type Result struct {
-	// Kind is "app", "file", "folder", "calc", "currency", "time" or
-	// "command". Calculations, conversions and times copy their Key.
+	// Kind is "app", "file", "folder", "calc", "currency", "time",
+	// "translation" or "command". Calculations, conversions and times copy
+	// their Key, translations their Title.
 	Kind string `json:"kind"`
-	// Key is what the result acts on: an app ID, a path, a calculated value
-	// or a command.
+	// Key is what the result acts on: an app ID, a path, a calculated value,
+	// the text a translation is of, or a command.
 	Key      string `json:"key"`
 	Title    string `json:"title"`
 	Subtitle string `json:"subtitle"`
 	// Icon is a data URL, or empty for kinds the page draws itself.
 	Icon string `json:"icon,omitempty"`
+	// Source and Target are a translation's language codes.
+	Source string `json:"source,omitempty"`
+	Target string `json:"target,omitempty"`
 }
 
 // maxResults is how many rows of each source the launcher shows.
