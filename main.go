@@ -13,6 +13,12 @@ import (
 //go:embed all:frontend/dist
 var frontend embed.FS
 
+// The design tokens are defined once, in the frontend's stylesheet; what
+// is drawn natively reads them from there.
+//
+//go:embed frontend/src/index.css
+var designCSS []byte
+
 func main() {
 	if runHelper() {
 		return
@@ -21,7 +27,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	if err := core.Run(assets); err != nil {
+	if err := core.Run(assets, designCSS); err != nil {
 		log.Fatal(err)
 	}
 }

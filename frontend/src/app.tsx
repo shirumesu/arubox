@@ -1,10 +1,20 @@
-import { Blocks, Camera, Keyboard, Languages, Rocket, Settings2, type LucideIcon } from "lucide-react";
+import {
+  Blocks,
+  Camera,
+  Keyboard,
+  Languages,
+  LayoutGrid,
+  Rocket,
+  Settings2,
+  type LucideIcon,
+} from "lucide-react";
 import { useState, type CSSProperties, type ReactNode } from "react";
 
 import appIcon from "../../build/icons/appicon.svg";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { useDashboard, type Mutate, type State } from "@/lib/dashboard";
+import { DesktopSettingsPage } from "@/modules/desktop/settings";
 import { LauncherSettingsPage } from "@/modules/launcher/settings";
 import { ScreenshotSettingsPage } from "@/modules/screenshot/settings";
 import { TranslateSettingsPage } from "@/modules/translate/settings";
@@ -31,6 +41,7 @@ const modulePages: Page[] = [
   { id: "translate", title: "翻译", icon: Languages, Page: TranslateSettingsPage },
   { id: "launcher", title: "启动器", icon: Rocket, Page: LauncherSettingsPage },
   { id: "screenshot", title: "截图", icon: Camera, Page: ScreenshotSettingsPage },
+  { id: "desktop", title: "桌面整理", icon: LayoutGrid, Page: DesktopSettingsPage },
 ];
 
 /** Lets the area act as the window's title bar on macOS, where the system one is hidden. */

@@ -73,74 +73,101 @@ func isUninstaller(name string) bool {
 // Icon returns the icon of an app (by ID) or a file, as a PNG of the given
 // size in DIPs, at twice the pixels for high-DPI screens.
 func Icon(id string, size int) []byte {
-	runtime.LockOSThread()
-	defer runtime.UnlockOSThread()
-	if err := windows.CoInitializeEx(0, coinitApartment); err == nil {
-		defer windows.CoUninitialize()
-	}
 	target := id
 	if !strings.Contains(id, `:\`) && !strings.HasPrefix(id, `\\`) {
 		target = appsFolder + id
 	}
-	name, err := windows.UTF16PtrFromString(target)
-	if err != nil {
+	img := shellImage(target, min(size*2, maxIconPixels), siigbfIconOnly|siigbfBiggerSizeOK)
+	if img.Width == 0 {
 		return nil
 	}
-	var factory comObject
-	hr, _, _ := procSHCreateItemFromParsingName.Call(uintptr(unsafe.Pointer(name)), 0,
-		uintptr(unsafe.Pointer(&iidIShellItemImageFactory)), uintptr(unsafe.Pointer(&factory)))
-	if !succeeded(hr) || factory == nil {
-		return nil
-	}
-	defer release(factory)
-	pixels := uintptr(min(size*2, maxIconPixels))
-	var bitmap uintptr
-	// SIZE is passed by value; its two 32-bit fields fit in one register.
-	if !succeeded(call(factory, slotGetImage, pixels|pixels<<32, siigbfIconOnly|siigbfBiggerSizeOK, uintptr(unsafe.Pointer(&bitmap)))) || bitmap == 0 {
-		return nil
-	}
-	defer procDeleteObject.Call(bitmap)
-	img := bitmapImage(bitmap)
-	if img == nil {
-		return nil
+	nrgba := image.NewNRGBA(image.Rect(0, 0, img.Width, img.Height))
+	for i := 0; i < len(img.Pixels); i += 4 {
+		b, g, r, a := img.Pixels[i], img.Pixels[i+1], img.Pixels[i+2], img.Pixels[i+3]
+		if a != 0 && a != 255 {
+			r, g, b = unpremultiply(r, a), unpremultiply(g, a), unpremultiply(b, a)
+		}
+		nrgba.Pix[i], nrgba.Pix[i+1], nrgba.Pix[i+2], nrgba.Pix[i+3] = r, g, b, a
 	}
 	var buf bytes.Buffer
-	if png.Encode(&buf, img) != nil {
+	if png.Encode(&buf, nrgba) != nil {
 		return nil
 	}
 	return buf.Bytes()
 }
 
-// bitmapImage reads a 32-bit HBITMAP with premultiplied alpha.
-func bitmapImage(bitmap uintptr) *image.NRGBA {
+// ItemImage returns what File Explorer shows for a shell item, given by its
+// parsing name: a thumbnail where the item has one, its icon otherwise, at
+// most pixels wide and high. The pixels are BGRA with premultiplied alpha;
+// an empty Image means there is none.
+func ItemImage(parsingName string, pixels int) Image {
+	img := shellImage(parsingName, pixels, 0)
+	// Some thumbnails come without alpha; they are opaque.
+	opaque := true
+	for i := 3; i < len(img.Pixels); i += 4 {
+		if img.Pixels[i] != 0 {
+			opaque = false
+			break
+		}
+	}
+	if opaque {
+		for i := 3; i < len(img.Pixels); i += 4 {
+			img.Pixels[i] = 255
+		}
+	}
+	return img
+}
+
+// shellImage asks a shell item for its image with IShellItemImageFactory.
+func shellImage(target string, pixels int, flags uintptr) Image {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	if err := windows.CoInitializeEx(0, coinitApartment); err == nil {
+		defer windows.CoUninitialize()
+	}
+	name, err := windows.UTF16PtrFromString(target)
+	if err != nil {
+		return Image{}
+	}
+	var factory comObject
+	hr, _, _ := procSHCreateItemFromParsingName.Call(uintptr(unsafe.Pointer(name)), 0,
+		uintptr(unsafe.Pointer(&iidIShellItemImageFactory)), uintptr(unsafe.Pointer(&factory)))
+	if !succeeded(hr) || factory == nil {
+		return Image{}
+	}
+	defer release(factory)
+	px := uintptr(pixels)
+	var bitmap uintptr
+	// SIZE is passed by value; its two 32-bit fields fit in one register.
+	if !succeeded(call(factory, slotGetImage, px|px<<32, flags, uintptr(unsafe.Pointer(&bitmap)))) || bitmap == 0 {
+		return Image{}
+	}
+	defer procDeleteObject.Call(bitmap)
+	return bitmapPixels(bitmap)
+}
+
+// bitmapPixels reads a 32-bit HBITMAP as top-down BGRA.
+func bitmapPixels(bitmap uintptr) Image {
 	var bm struct {
 		Type, Width, Height, WidthBytes int32
 		Planes, BitsPixel               uint16
 		Bits                            uintptr
 	}
 	if n, _, _ := procGetObjectW.Call(bitmap, unsafe.Sizeof(bm), uintptr(unsafe.Pointer(&bm))); n == 0 || bm.Width <= 0 || bm.Height <= 0 {
-		return nil
+		return Image{}
 	}
 	screen, _, _ := procGetDC.Call(0)
 	if screen == 0 {
-		return nil
+		return Image{}
 	}
 	defer procReleaseDC.Call(0, screen)
 	width, height := int(bm.Width), int(bm.Height)
 	info := bitmapInfo{Size: bitmapInfoHeaderBytes, Width: bm.Width, Height: -bm.Height, Planes: 1, BitCount: 32}
 	bgra := make([]byte, width*height*4)
 	if n, _, _ := procGetDIBits.Call(screen, bitmap, 0, uintptr(height), uintptr(unsafe.Pointer(&bgra[0])), uintptr(unsafe.Pointer(&info)), dibRGBColors); n == 0 {
-		return nil
+		return Image{}
 	}
-	img := image.NewNRGBA(image.Rect(0, 0, width, height))
-	for i := 0; i < len(bgra); i += 4 {
-		b, g, r, a := bgra[i], bgra[i+1], bgra[i+2], bgra[i+3]
-		if a != 0 && a != 255 {
-			r, g, b = unpremultiply(r, a), unpremultiply(g, a), unpremultiply(b, a)
-		}
-		img.Pix[i], img.Pix[i+1], img.Pix[i+2], img.Pix[i+3] = r, g, b, a
-	}
-	return img
+	return Image{Pixels: bgra, Width: width, Height: height}
 }
 
 func unpremultiply(c, a byte) byte {

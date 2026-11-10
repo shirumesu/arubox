@@ -13,9 +13,11 @@ import (
 	"github.com/wailsapp/wails/v3/pkg/events"
 
 	"github.com/shirumesu/arubox/internal/config"
+	"github.com/shirumesu/arubox/internal/design"
 	"github.com/shirumesu/arubox/internal/hotkey"
 	"github.com/shirumesu/arubox/internal/logging"
 	"github.com/shirumesu/arubox/internal/module"
+	"github.com/shirumesu/arubox/internal/modules/desktop"
 	"github.com/shirumesu/arubox/internal/modules/launcher"
 	"github.com/shirumesu/arubox/internal/modules/screenshot"
 	"github.com/shirumesu/arubox/internal/modules/translate"
@@ -42,8 +44,12 @@ type Core struct {
 }
 
 // Run starts the program and blocks until it quits. assets is the built
-// frontend.
-func Run(assets fs.FS) error {
+// frontend and css its stylesheet, which holds the design tokens.
+func Run(assets fs.FS, css []byte) error {
+	tokens, err := design.Parse(css)
+	if err != nil {
+		return err
+	}
 	logDir, err := logDirectory()
 	if err != nil {
 		return err
@@ -71,6 +77,7 @@ func Run(assets fs.FS) error {
 		translator,
 		launcher.New(store, log, launcherTranslator{translator}),
 		screenshot.New(store, log, screenshotTranslator{translator}),
+		desktop.New(store, log, tokens),
 	}
 	services := []application.Service{application.NewService(&DashboardService{core: c})}
 	for _, m := range modules {
