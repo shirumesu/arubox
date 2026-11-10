@@ -1,0 +1,133 @@
+version: '3'
+
+vars:
+  APP_NAME: arubox
+  VERSION: 0.1.0
+  BIN_DIR: bin
+  VITE_PORT: '{{.WAILS_VITE_PORT | default 9245}}'
+  LDFLAGS_VERSION: -X github.com/shirumesu/arubox/internal/core.Version={{.VERSION}}
+  # Production builds drop the Wails dev server proxy and devtools.
+  PROD_FLAGS: -tags production -trimpath -buildvcs=false
+  DEV_FLAGS: -buildvcs=false -gcflags=all="-l"
+
+env:
+  MACOSX_DEPLOYMENT_TARGET: '13.0'
+  CGO_CFLAGS: -mmacosx-version-min=13.0
+  CGO_LDFLAGS: -mmacosx-version-min=13.0
+
+tasks:
+  default:
+    cmds:
+      - task --list
+
+  install:
+    desc: Install frontend dependencies
+    dir: frontend
+    sources: [package.json, pnpm-lock.yaml]
+    generates: [node_modules/.modules.yaml]
+    cmds:
+      - pnpm install --frozen-lockfile
+
+  bindings:
+    desc: Generate TypeScript bindings for the Go services
+    sources: ['**/*.go', go.mod, go.sum]
+    generates: [frontend/bindings/**/*]
+    cmds:
+      - wails generate bindings -clean=true -ts -i ./...
+
+  frontend:
+    desc: Build the frontend into frontend/dist
+    deps: [install, bindings]
+    dir: frontend
+    sources: ['src/**/*', 'bindings/**/*', index.html, package.json, vite.config.ts, tsconfig.json]
+    generates: [dist/**/*]
+    cmds:
+      - pnpm run build
+
+  icons:
+    desc: Render every icon from the SVG sources in build/icons
+    cmds:
+      - rsvg-convert -w 1024 -h 1024 build/icons/appicon.svg -o build/appicon.png
+      - rsvg-convert -w 32 -h 32 build/icons/tray.svg -o internal/core/assets/tray.png
+      - rsvg-convert -w 44 -h 44 build/icons/tray-template.svg -o internal/core/assets/tray-template.png
+      - wails generate icons -input build/appicon.png -macfilename build/darwin/icons.icns -windowsfilename build/windows/icon.ico
+
+  build:
+    desc: Build the macOS app bundle (bin/arubox.app)
+    deps: [frontend]
+    cmds:
+      - go build {{.PROD_FLAGS}} -ldflags="-w -s {{.LDFLAGS_VERSION}}" -o {{.BIN_DIR}}/{{.APP_NAME}} .
+      - task: bundle
+        vars: {BUNDLE: '{{.APP_NAME}}.app', PLIST: build/darwin/Info.plist}
+
+  build:windows:
+    desc: Cross-compile bin/arubox.exe for Windows (ARCH=amd64 or arm64)
+    deps: [frontend]
+    vars:
+      ARCH: '{{.ARCH | default "amd64"}}'
+    cmds:
+      - defer: rm -f {{.APP_NAME}}_windows_{{.ARCH}}.syso
+      - >-
+        wails generate syso -arch {{.ARCH}}
+        -icon build/windows/icon.ico
+        -manifest build/windows/arubox.exe.manifest
+        -info build/windows/info.json
+        -out {{.APP_NAME}}_windows_{{.ARCH}}.syso
+      - go build {{.PROD_FLAGS}} -ldflags="-w -s -H windowsgui {{.LDFLAGS_VERSION}}" -o {{.BIN_DIR}}/{{.APP_NAME}}.exe .
+    env:
+      GOOS: windows
+      GOARCH: '{{.ARCH}}'
+      CGO_ENABLED: '0'
+
+  bundle:
+    internal: true
+    vars:
+      APP: '{{.BIN_DIR}}/{{.BUNDLE}}'
+    cmds:
+      - rm -rf "{{.APP}}"
+      - mkdir -p "{{.APP}}/Contents/MacOS" "{{.APP}}/Contents/Resources"
+      - cp {{.BIN_DIR}}/{{.APP_NAME}} "{{.APP}}/Contents/MacOS/{{.APP_NAME}}"
+      - cp build/darwin/icons.icns "{{.APP}}/Contents/Resources/"
+      - cp {{.PLIST}} "{{.APP}}/Contents/Info.plist"
+      - xattr -cr "{{.APP}}"
+      - codesign --force --deep --sign - "{{.APP}}"
+
+  run:
+    desc: Build a development bundle and run it (used by `task dev`)
+    deps: [frontend]
+    cmds:
+      - go build {{.DEV_FLAGS}} -ldflags="{{.LDFLAGS_VERSION}}-dev" -o {{.BIN_DIR}}/{{.APP_NAME}} .
+      - task: bundle
+        vars: {BUNDLE: '{{.APP_NAME}}.dev.app', PLIST: build/darwin/Info.dev.plist}
+      - '"{{.BIN_DIR}}/{{.APP_NAME}}.dev.app/Contents/MacOS/{{.APP_NAME}}"'
+
+  dev:
+    desc: Run with frontend hot reload; Go changes rebuild and restart the app
+    cmds:
+      - wails dev -config ./build/config.yml -port {{.VITE_PORT}}
+
+  dev:frontend:
+    desc: Run only the Vite dev server (started by `task dev`)
+    deps: [install, bindings]
+    dir: frontend
+    cmds:
+      - pnpm exec vite --port {{.VITE_PORT}} --strictPort
+
+  lint:
+    desc: Lint Go (for both macOS and Windows) and the frontend
+    deps: [bindings, install]
+    cmds:
+      - golangci-lint run ./...
+      - GOOS=windows CGO_ENABLED=0 golangci-lint run ./...
+      - cd frontend && pnpm run lint
+
+  fmt:
+    desc: Format Go and frontend sources
+    cmds:
+      - golangci-lint fmt ./...
+      - cd frontend && pnpm run format
+
+  test:
+    desc: Run the Go tests
+    cmds:
+      - go test ./...

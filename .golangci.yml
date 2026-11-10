@@ -1,0 +1,42 @@
+version: "2"
+
+linters:
+  enable:
+    - bodyclose
+    - errorlint
+    - gocritic
+    - gosec
+    - misspell
+    - nolintlint
+    - perfsprint
+    - revive
+    - unconvert
+    - unparam
+    - usestdlibvars
+  settings:
+    revive:
+      rules:
+        - name: exported
+        - name: package-comments
+        - name: var-naming
+        - name: indent-error-flow
+        - name: early-return
+    gosec:
+      excludes:
+        - G104 # unchecked errors are errcheck's job, which allows Close and Remove
+        - G204 # subprocess with variable arguments: only fixed system tools are run
+        - G301 # 0755 directories are intended for settings and logs
+        - G302
+        - G304 # file paths come from the user's own config/log directories
+  exclusions:
+    presets:
+      - std-error-handling
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/shirumesu/arubox
