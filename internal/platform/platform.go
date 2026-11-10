@@ -94,6 +94,19 @@ func (img Image) ServeBMP(w http.ResponseWriter) {
 	_, _ = w.Write(img.Pixels)
 }
 
+// KeyPress is a key going down or up while CaptureKeys holds the keyboard.
+type KeyPress struct {
+	// Key is the key's name in the accelerator syntax, or "" for modifier
+	// keys and keys a hotkey cannot use.
+	Key string `json:"key"`
+	// Modifiers are the modifiers held after this event, in the
+	// accelerator order: Ctrl, Alt, Shift, Super.
+	Modifiers []string `json:"modifiers"`
+	Down      bool     `json:"down"`
+	// Idle reports that no key is held any more.
+	Idle bool `json:"idle"`
+}
+
 // minWindowSize leaves out windows too small to be worth capturing, such as
 // invisible helpers.
 const minWindowSize = 40

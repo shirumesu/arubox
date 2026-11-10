@@ -1,7 +1,9 @@
-import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { Events } from "@wailsio/runtime";
+import { useEffect, useEffectEvent, useRef, useState, type KeyboardEvent } from "react";
 
 import { DashboardService } from "@bindings/core";
-import { formatModifier, keycaps, keyOf, modifiersOf, type Platform } from "@/lib/accelerator";
+import type { KeyPress } from "@bindings/platform";
+import { formatModifier, keycaps, keyOf, modifiersOf, type Modifier, type Platform } from "@/lib/accelerator";
 import { cn } from "cn";
 
 export function Keycaps({ caps, className }: { caps: string[]; className?: string }) {
@@ -82,14 +84,10 @@ export function HotkeyRecorder({
     [],
   );
 
-  const onKeyDown = (e: KeyboardEvent<HTMLButtonElement>) => {
-    if (!recordingRef.current && !saving.current) return;
-    e.preventDefault();
-    e.stopPropagation();
-    pressed.current.add(e.code);
+  const active = () => recordingRef.current || saving.current !== null;
+
+  const press = (mods: Modifier[], key: string | null) => {
     if (saving.current) return;
-    const mods = modifiersOf(e.nativeEvent);
-    const key = keyOf(e.nativeEvent);
     if (key === "escape" && mods.length === 0) {
       stop();
       return;
@@ -107,14 +105,43 @@ export function HotkeyRecorder({
     saving.current = onRecord([...mods, key].join("+"));
   };
 
-  const onKeyUp = (e: KeyboardEvent<HTMLButtonElement>) => {
-    if (!recordingRef.current && !saving.current) return;
-    pressed.current.delete(e.code);
+  /** A key went up; idle means none is held any more. */
+  const lift = (mods: Modifier[], idle: boolean) => {
     if (recordingRef.current) {
-      setHeld(modifiersOf(e.nativeEvent).map((m) => formatModifier(m, platform)));
-    } else if (pressed.current.size === 0) {
+      setHeld(mods.map((m) => formatModifier(m, platform)));
+    } else if (idle) {
       released();
     }
+  };
+
+  // On Windows the Go side takes the keyboard while recording, so that the
+  // system and other programs do not act on the keys, and sends them here.
+  const onCapturedKey = useEffectEvent((k: KeyPress) => {
+    if (!active()) return;
+    const mods = k.modifiers as Modifier[];
+    if (k.down) press(mods, k.key || null);
+    else lift(mods, k.idle);
+  });
+  useEffect(
+    () =>
+      Events.On("hotkey:key", (event) => {
+        onCapturedKey(event.data);
+      }),
+    [],
+  );
+
+  const onKeyDown = (e: KeyboardEvent<HTMLButtonElement>) => {
+    if (!active()) return;
+    e.preventDefault();
+    e.stopPropagation();
+    pressed.current.add(e.code);
+    press(modifiersOf(e.nativeEvent), keyOf(e.nativeEvent));
+  };
+
+  const onKeyUp = (e: KeyboardEvent<HTMLButtonElement>) => {
+    if (!active()) return;
+    pressed.current.delete(e.code);
+    lift(modifiersOf(e.nativeEvent), pressed.current.size === 0);
   };
 
   return (

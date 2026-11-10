@@ -5,7 +5,7 @@
 export type Platform = "darwin" | "windows";
 
 const MODIFIERS = ["Ctrl", "Alt", "Shift", "Super"] as const;
-type Modifier = (typeof MODIFIERS)[number];
+export type Modifier = (typeof MODIFIERS)[number];
 
 const NAMED_CODES: Record<string, string> = {
   Minus: "-",
