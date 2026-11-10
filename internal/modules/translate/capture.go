@@ -191,7 +191,12 @@ func (c *capture) hide() {
 	}
 	c.win.Hide()
 	c.win.EmitEvent(frameEndEvent)
-	keep := c.keep()
+	c.scheduleRelease(c.keep())
+}
+
+// scheduleRelease closes the hidden window once it has stayed unused for
+// keep, or never when keep is 0. c.mu must be held.
+func (c *capture) scheduleRelease(keep time.Duration) {
 	if keep <= 0 {
 		return
 	}

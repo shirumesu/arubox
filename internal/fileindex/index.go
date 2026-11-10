@@ -5,6 +5,8 @@
 package fileindex
 
 import (
+	"bytes"
+	"slices"
 	"strings"
 	"sync"
 	"unicode"
@@ -16,7 +18,7 @@ const rootRecord = 5
 
 // volume is the index of one volume, kept as parallel arrays with no
 // pointer per file, so a million files cost the garbage collector nothing
-// to scan and take about 60 bytes each.
+// to scan and take about 40 bytes each besides their names.
 type volume struct {
 	mu sync.RWMutex
 
@@ -25,16 +27,22 @@ type volume struct {
 	journalID uint64
 	nextUSN   int64
 
-	// names holds each entry's name in UTF-8 followed by a 0, and folded
-	// the same names lowercased; lowercasing keeps every character's
-	// length, so both share off.
+	// names holds each entry's name lowercased in UTF-8, followed by a 0,
+	// which is what a search goes through.
 	names  []byte
-	folded []byte
 	off    []uint32
 	parent []uint32 // the record number of the entry's folder
 	rec    []uint32 // the entry's own record number
 	seq    []uint16 // the record's sequence number
 	flags  []byte
+
+	// Most names have no capitals, so only the others are kept as written
+	// as well: cased holds them, each followed by a 0, casedAt their
+	// entries in order and casedOff where each starts. Their entries have
+	// flagCased.
+	cased    []byte
+	casedAt  []uint32
+	casedOff []uint32
 
 	// byRec maps a record number to its first entry plus one; 0 is none.
 	// links holds the further entries of a file with several hard links.
@@ -55,31 +63,80 @@ type link struct {
 
 func (v *volume) count() int { return len(v.off) - v.dead }
 
-// name returns entry i's name, folded or not.
+// name returns entry i's name, folded or as written.
 func (v *volume) name(i int, folded bool) []byte {
-	pool := v.names
-	if folded {
-		pool = v.folded
+	if folded || v.flags[i]&flagCased == 0 {
+		end := len(v.names) - 1
+		if i+1 < len(v.off) {
+			end = int(v.off[i+1]) - 1
+		}
+		return v.names[v.off[i]:end]
 	}
-	end := len(pool) - 1
-	if i+1 < len(v.off) {
-		end = int(v.off[i+1]) - 1
+	k, _ := slices.BinarySearch(v.casedAt, uint32(i))
+	end := len(v.cased) - 1
+	if k+1 < len(v.casedOff) {
+		end = int(v.casedOff[k+1]) - 1
 	}
-	return pool[v.off[i]:end]
+	return v.cased[v.casedOff[k]:end]
 }
 
 // add appends an entry and returns its index.
-func (v *volume) add(rec uint32, seq uint16, parent uint32, flags byte, name string) int {
+func (v *volume) add(rec uint32, seq uint16, parent uint32, flags byte, name []byte) int {
 	i := len(v.off)
-	v.off = append(v.off, uint32(len(v.names)))
-	v.names = append(append(v.names, name...), 0)
-	v.folded = appendFolded(v.folded, name)
-	v.folded = append(v.folded, 0)
+	start := len(v.names)
+	v.off = grow(v.off, 1)
+	v.names = grow(v.names, len(name)+1)
+	v.parent, v.rec, v.seq, v.flags = grow(v.parent, 1), grow(v.rec, 1), grow(v.seq, 1), grow(v.flags, 1)
+	v.off = append(v.off, uint32(start))
+	v.names = appendFolded(v.names, name)
+	flags &^= flagCased
+	if !bytes.Equal(v.names[start:], name) {
+		flags |= flagCased
+		v.addCased(i, name)
+	}
+	v.names = append(v.names, 0)
 	v.parent = append(v.parent, parent)
 	v.rec = append(v.rec, rec)
 	v.seq = append(v.seq, seq)
 	v.flags = append(v.flags, flags)
 	return i
+}
+
+// addCased keeps entry i's name as written.
+func (v *volume) addCased(i int, name []byte) {
+	v.casedAt, v.casedOff = grow(v.casedAt, 1), grow(v.casedOff, 1)
+	v.cased = grow(v.cased, len(name)+1)
+	v.casedAt = append(v.casedAt, uint32(i))
+	v.casedOff = append(v.casedOff, uint32(len(v.cased)))
+	v.cased = append(append(v.cased, name...), 0)
+}
+
+// grow makes room for n more elements. The arrays are large and change
+// little once listed, so they grow by a sixteenth rather than append's
+// quarter, which would leave megabytes unused after the first change.
+func grow[S ~[]E, E any](s S, n int) S {
+	if cap(s)-len(s) >= n {
+		return s
+	}
+	t := make(S, len(s), len(s)+max(n, len(s)/16, 1024))
+	copy(t, s)
+	return t
+}
+
+// reindex rebuilds the lookup by record from the live entries.
+func (v *volume) reindex() {
+	top := uint32(0)
+	for i, r := range v.rec {
+		if v.flags[i]&flagDead == 0 {
+			top = max(top, r)
+		}
+	}
+	v.byRec, v.links = make([]uint32, top+1), map[uint32][]uint32{}
+	for i := range v.off {
+		if v.flags[i]&flagDead == 0 {
+			v.index(i)
+		}
+	}
 }
 
 // index records entry i under its record number.
@@ -133,7 +190,7 @@ func (v *volume) set(rec uint32, seq uint16, flags byte, links []link, ex *exclu
 				continue
 			}
 		}
-		i := v.add(rec, seq, l.parent, flags, l.name)
+		i := v.add(rec, seq, l.parent, flags, []byte(l.name))
 		v.index(i)
 		if flags&flagDir != 0 && ex.match(v, i) {
 			v.flags[i] |= flagExcluded
@@ -162,12 +219,7 @@ const maxDepth = 512
 // record. It also finishes a full listing, which arrives in file table
 // order with children before their folders.
 func (v *volume) compact(ex *excludes) {
-	v.byRec, v.links = nil, map[uint32][]uint32{}
-	for i := range v.off {
-		if v.flags[i]&flagDead == 0 {
-			v.index(i)
-		}
-	}
+	v.reindex()
 	n := len(v.off)
 	state := make([]byte, n)
 	var chain []int
@@ -214,20 +266,28 @@ func (v *volume) compact(ex *excludes) {
 		}
 	}
 
-	kept := 0
-	for _, s := range state {
-		if s != stateDrop {
-			kept++
+	kept, keptNames, keptCased, keptCasedNames := 0, 0, 0, 0
+	for i, s := range state {
+		if s == stateDrop {
+			continue
+		}
+		kept++
+		keptNames += len(v.name(i, true)) + 1
+		if v.flags[i]&flagCased != 0 {
+			keptCased++
+			keptCasedNames += len(v.name(i, false)) + 1
 		}
 	}
-	out := &volume{guid: v.guid, mount: v.mount, journalID: v.journalID, nextUSN: v.nextUSN, links: map[uint32][]uint32{}}
+	out := &volume{}
 	out.off = make([]uint32, 0, kept)
 	out.parent = make([]uint32, 0, kept)
 	out.rec = make([]uint32, 0, kept)
 	out.seq = make([]uint16, 0, kept)
 	out.flags = make([]byte, 0, kept)
-	out.names = make([]byte, 0, len(v.names))
-	out.folded = make([]byte, 0, len(v.folded))
+	out.names = make([]byte, 0, keptNames)
+	out.casedAt = make([]uint32, 0, keptCased)
+	out.casedOff = make([]uint32, 0, keptCased)
+	out.cased = make([]byte, 0, keptCasedNames)
 	for i, s := range state {
 		if s == stateDrop {
 			continue
@@ -236,19 +296,20 @@ func (v *volume) compact(ex *excludes) {
 		if s == stateKeepEmpty {
 			flags |= flagExcluded
 		}
+		if flags&flagCased != 0 {
+			out.addCased(len(out.off), v.name(i, false))
+		}
 		out.off = append(out.off, uint32(len(out.names)))
-		out.names = append(append(out.names, v.name(i, false)...), 0)
-		out.folded = append(append(out.folded, v.name(i, true)...), 0)
+		out.names = append(append(out.names, v.name(i, true)...), 0)
 		out.parent = append(out.parent, v.parent[i])
 		out.rec = append(out.rec, v.rec[i])
 		out.seq = append(out.seq, v.seq[i])
 		out.flags = append(out.flags, flags)
 	}
-	for i := range out.off {
-		out.index(i)
-	}
-	v.names, v.folded, v.off, v.parent, v.rec, v.seq, v.flags = out.names, out.folded, out.off, out.parent, out.rec, out.seq, out.flags
-	v.byRec, v.links, v.dead = out.byRec, out.links, 0
+	v.names, v.off, v.parent, v.rec, v.seq, v.flags = out.names, out.off, out.parent, out.rec, out.seq, out.flags
+	v.cased, v.casedAt, v.casedOff = out.cased, out.casedAt, out.casedOff
+	v.dead = 0
+	v.reindex()
 }
 
 // path returns entry i's full path, folded or not. ok is false when the entry can no longer be reached, such as a
@@ -266,7 +327,7 @@ func (v *volume) path(i int, folded bool) (path string, ok bool) {
 	var b strings.Builder
 	mount := v.mount
 	if folded {
-		mount = string(appendFolded(nil, mount))
+		mount = string(appendFolded(nil, []byte(mount)))
 	}
 	b.WriteString(mount)
 	for k := len(parts) - 1; k >= 0; k-- {
@@ -293,21 +354,26 @@ func (v *volume) depth(i int) (int, bool) {
 }
 
 // appendFolded appends s lowercased. A character whose lowercase form has
-// another length in UTF-8 stays as it is, so folded names line up with
-// the originals.
-func appendFolded(b []byte, s string) []byte {
-	for _, r := range s {
-		if r < utf8.RuneSelf {
-			if 'A' <= r && r <= 'Z' {
-				r += 'a' - 'A'
+// another length in UTF-8 stays as it is, so a folded name is as long as
+// the original.
+func appendFolded(b, s []byte) []byte {
+	for len(s) > 0 {
+		c := s[0]
+		if c < utf8.RuneSelf {
+			if 'A' <= c && c <= 'Z' {
+				c += 'a' - 'A'
 			}
-			b = append(b, byte(r))
+			b = append(b, c)
+			s = s[1:]
 			continue
 		}
-		if l := unicode.ToLower(r); utf8.RuneLen(l) == utf8.RuneLen(r) {
-			r = l
+		r, n := utf8.DecodeRune(s)
+		if l := unicode.ToLower(r); r != utf8.RuneError && utf8.RuneLen(l) == n {
+			b = utf8.AppendRune(b, l)
+		} else {
+			b = append(b, s[:n]...)
 		}
-		b = utf8.AppendRune(b, r)
+		s = s[n:]
 	}
 	return b
 }
@@ -329,7 +395,7 @@ func newExcludes(list []string) *excludes {
 		if e == "" {
 			continue
 		}
-		f := string(appendFolded(nil, e))
+		f := string(appendFolded(nil, []byte(e)))
 		if strings.Contains(f, `\`) {
 			ex.paths[f] = true
 			ex.last[f[strings.LastIndexByte(f, '\\')+1:]] = true

@@ -160,7 +160,7 @@ func (m *Module) Enable(ctx module.Context) error {
 	m.mu.Lock()
 	m.files = files
 	m.app = ctx.App
-	m.panel = newPanel(ctx.App, m.keepTime)
+	m.panel = newPanel(ctx.App, m.keepTime, m.keepLocked())
 	m.icons = map[string]string{}
 	m.mu.Unlock()
 	go m.scan()
@@ -188,6 +188,11 @@ func (m *Module) Disable() error {
 func (m *Module) keepTime() time.Duration {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.keepLocked()
+}
+
+// keepLocked is keepTime with m.mu held.
+func (m *Module) keepLocked() time.Duration {
 	return time.Duration(m.stored.KeepMinutes) * time.Minute
 }
 

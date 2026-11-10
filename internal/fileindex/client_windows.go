@@ -362,7 +362,7 @@ func (c *Client) apply(kind byte, payload []byte, ex *excludes, current, listing
 		}
 		for len(d.b) > 0 && d.err == nil {
 			frn, parent, flags, name := d.u64(), d.u32(), d.u8(), d.bytes()
-			v.add(recordNumber(frn), sequence(frn), parent, flags, string(name))
+			v.add(recordNumber(frn), sequence(frn), parent, flags, name)
 		}
 		return d.err
 	case frameScanned:

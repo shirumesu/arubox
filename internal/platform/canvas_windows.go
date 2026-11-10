@@ -13,28 +13,38 @@ import (
 // A Canvas draws one desktop surface with Direct2D into a bitmap that the
 // surface's layered window shows. It draws in software: the scene is small,
 // a software target keeps no GPU memory and is never lost with the device.
-// Canvases and what they make are used on the desktop's UI thread only.
+// The bitmap is a WIC bitmap the window is updated from through GDI, which
+// lends it to GDI without copying; a DC target bound to a GDI bitmap would
+// keep a second screen-sized bitmap of its own. Canvases and what they make
+// are used on the desktop's UI thread only.
 
 var (
 	d2d1                         = windows.NewLazySystemDLL("d2d1.dll")
 	dwrite                       = windows.NewLazySystemDLL("dwrite.dll")
 	procD2D1CreateFactory        = d2d1.NewProc("D2D1CreateFactory")
 	procDWriteCreateFactory      = dwrite.NewProc("DWriteCreateFactory")
-	procCreateDIBSection         = gdi32.NewProc("CreateDIBSection")
-	procCreateCompatibleDC       = gdi32.NewProc("CreateCompatibleDC")
 	procSelectObject             = gdi32.NewProc("SelectObject")
-	procDeleteDC                 = gdi32.NewProc("DeleteDC")
 	procGetUserDefaultLocaleName = kernel32.NewProc("GetUserDefaultLocaleName")
 )
 
 var (
 	iidID2D1Factory   = windows.GUID{Data1: 0x06152247, Data2: 0x6f50, Data3: 0x465a, Data4: [8]byte{0x92, 0x45, 0x11, 0x8b, 0xfd, 0x3b, 0x60, 0x07}}
 	iidIDWriteFactory = windows.GUID{Data1: 0xb859ee5a, Data2: 0xd838, Data3: 0x4b5b, Data4: [8]byte{0xa2, 0xe8, 0x1a, 0xdc, 0x7d, 0x93, 0xdb, 0x48}}
+
+	clsidWICImagingFactory       = windows.GUID{Data1: 0xcacaf262, Data2: 0x9370, Data3: 0x4615, Data4: [8]byte{0xa1, 0x3b, 0x9f, 0x55, 0x39, 0xda, 0x4c, 0x0a}}
+	iidIWICImagingFactory        = windows.GUID{Data1: 0xec5ec8a9, Data2: 0xc395, Data3: 0x4314, Data4: [8]byte{0x9c, 0x77, 0x54, 0xd7, 0xa9, 0x35, 0xff, 0x70}}
+	iidID2D1GdiInteropTarget     = windows.GUID{Data1: 0xe0db51c3, Data2: 0x6f77, Data3: 0x4bae, Data4: [8]byte{0xb3, 0xd5, 0xe4, 0x75, 0x09, 0xb3, 0x58, 0x38}}
+	guidWICPixelFormat32bppPBGRA = windows.GUID{Data1: 0x6fddc324, Data2: 0x4e03, Data3: 0x4bfe, Data4: [8]byte{0xb1, 0x85, 0x3d, 0x77, 0x76, 0x8d, 0xc9, 0x10}}
 )
 
 // Virtual table slots.
 const (
-	slotFactoryCreateDCRenderTarget = 16 // ID2D1Factory
+	slotFactoryCreateWicBitmapRenderTarget = 13 // ID2D1Factory
+
+	slotWICCreateBitmap = 17 // IWICImagingFactory
+
+	slotGdiGetDC     = 3 // ID2D1GdiInteropRenderTarget
+	slotGdiReleaseDC = 4
 
 	slotRTCreateBitmap          = 4 // ID2D1RenderTarget
 	slotRTCreateSolidColorBrush = 8
@@ -50,7 +60,6 @@ const (
 	slotRTClear                 = 47
 	slotRTBeginDraw             = 48
 	slotRTEndDraw               = 49
-	slotDCRTBindDC              = 57 // ID2D1DCRenderTarget
 
 	slotBrushSetColor = 8 // ID2D1SolidColorBrush
 
@@ -70,6 +79,9 @@ const (
 	dxgiFormatB8G8R8A8         = 87
 	d2dAlphaPremultiplied      = 1
 	d2dTargetSoftware          = 1
+	d2dUsageGDICompatible      = 2
+	d2dDCInitializeCopy        = 0
+	wicBitmapCacheOnLoad       = 2
 	d2dTextAntialiasGrayscale  = 2
 	d2dAntialiasPerPrimitive   = 0
 	d2dInterpolationLinear     = 1
@@ -115,9 +127,11 @@ type d2dMatrix struct{ M11, M12, M21, M22, DX, DY float32 }
 var (
 	d2dFactory comObject
 	dwFactory  comObject
+	wicFactory comObject
 )
 
-// drawingFactories creates the Direct2D and DirectWrite factories once.
+// drawingFactories creates the Direct2D, DirectWrite and WIC factories
+// once.
 func drawingFactories() error {
 	if d2dFactory != nil {
 		return nil
@@ -131,7 +145,14 @@ func drawingFactories() error {
 		release(f)
 		return errors.New("创建 DirectWrite 失败")
 	}
-	d2dFactory, dwFactory = f, dw
+	var wic comObject
+	if hr, _, _ := procCoCreateInstance.Call(uintptr(unsafe.Pointer(&clsidWICImagingFactory)), 0, clsctxInprocServer,
+		uintptr(unsafe.Pointer(&iidIWICImagingFactory)), uintptr(unsafe.Pointer(&wic))); !succeeded(hr) {
+		release(f)
+		release(dw)
+		return errors.New("创建 WIC 失败")
+	}
+	d2dFactory, dwFactory, wicFactory = f, dw, wic
 	return nil
 }
 
@@ -156,10 +177,10 @@ func toD2DColor(c design.Color) d2dColor {
 // Canvas is the drawing surface of one desktop surface. Coordinates are in
 // physical pixels of the virtual screen.
 type Canvas struct {
-	target     comObject // ID2D1DCRenderTarget
+	bitmap     comObject // IWICBitmap
+	target     comObject // ID2D1RenderTarget
+	gdi        comObject // ID2D1GdiInteropRenderTarget
 	brush      comObject
-	dc, dib    uintptr
-	oldBitmap  uintptr
 	width      int
 	height     int
 	originX    float64
@@ -172,19 +193,10 @@ func newCanvas(width, height int, originX, originY float64) (*Canvas, error) {
 		return nil, err
 	}
 	c := &Canvas{width: width, height: height, originX: originX, originY: originY}
-	dc, _, _ := procCreateCompatibleDC.Call(0)
-	if dc == 0 {
+	if !succeeded(call(wicFactory, slotWICCreateBitmap, uintptr(width), uintptr(height),
+		uintptr(unsafe.Pointer(&guidWICPixelFormat32bppPBGRA)), wicBitmapCacheOnLoad, uintptr(unsafe.Pointer(&c.bitmap)))) {
 		return nil, errors.New("创建绘图表面失败")
 	}
-	info := bitmapInfo{Size: bitmapInfoHeaderBytes, Width: int32(width), Height: -int32(height), Planes: 1, BitCount: 32}
-	var bits uintptr
-	dib, _, _ := procCreateDIBSection.Call(dc, uintptr(unsafe.Pointer(&info)), dibRGBColors, uintptr(unsafe.Pointer(&bits)), 0, 0)
-	if dib == 0 {
-		procDeleteDC.Call(dc)
-		return nil, errors.New("创建绘图表面失败")
-	}
-	c.dc, c.dib = dc, dib
-	c.oldBitmap, _, _ = procSelectObject.Call(dc, dib)
 	if err := c.createTarget(); err != nil {
 		c.release()
 		return nil, err
@@ -197,42 +209,55 @@ func (c *Canvas) createTarget() error {
 		Type:        d2dTargetSoftware,
 		PixelFormat: d2dPixelFormat{dxgiFormatB8G8R8A8, d2dAlphaPremultiplied},
 		DpiX:        96, DpiY: 96,
+		Usage: d2dUsageGDICompatible,
 	}
 	var t comObject
-	if !succeeded(call(d2dFactory, slotFactoryCreateDCRenderTarget, uintptr(unsafe.Pointer(&props)), uintptr(unsafe.Pointer(&t)))) {
+	if !succeeded(call(d2dFactory, slotFactoryCreateWicBitmapRenderTarget, uintptr(unsafe.Pointer(c.bitmap)), uintptr(unsafe.Pointer(&props)), uintptr(unsafe.Pointer(&t)))) {
 		return errors.New("创建 Direct2D 目标失败")
 	}
-	r := rect{Right: int32(c.width), Bottom: int32(c.height)}
-	if !succeeded(call(t, slotDCRTBindDC, c.dc, uintptr(unsafe.Pointer(&r)))) {
+	var gdi comObject
+	if !succeeded(call(t, slotQueryInterface, uintptr(unsafe.Pointer(&iidID2D1GdiInteropTarget)), uintptr(unsafe.Pointer(&gdi)))) {
 		release(t)
-		return errors.New("绑定 Direct2D 目标失败")
+		return errors.New("创建 Direct2D 目标失败")
 	}
 	var brush comObject
 	white := d2dColor{1, 1, 1, 1}
 	if !succeeded(call(t, slotRTCreateSolidColorBrush, uintptr(unsafe.Pointer(&white)), 0, uintptr(unsafe.Pointer(&brush)))) {
+		release(gdi)
 		release(t)
 		return errors.New("创建画笔失败")
 	}
 	call(t, slotRTSetTextAntialiasMode, d2dTextAntialiasGrayscale)
-	c.target, c.brush = t, brush
+	c.target, c.gdi, c.brush = t, gdi, brush
 	c.generation++
 	return nil
 }
 
 func (c *Canvas) releaseTarget() {
 	release(c.brush)
+	release(c.gdi)
 	release(c.target)
-	c.brush, c.target = nil, nil
+	c.brush, c.gdi, c.target = nil, nil, nil
 }
 
 func (c *Canvas) release() {
 	c.releaseTarget()
-	if c.dc != 0 {
-		procSelectObject.Call(c.dc, c.oldBitmap)
-		procDeleteObject.Call(c.dib)
-		procDeleteDC.Call(c.dc)
-		c.dc, c.dib = 0, 0
+	release(c.bitmap)
+	c.bitmap = nil
+}
+
+// withDC lends the bitmap to GDI as a device context for f, outside
+// drawing.
+func (c *Canvas) withDC(f func(dc uintptr)) {
+	call(c.target, slotRTBeginDraw)
+	var dc uintptr
+	if succeeded(call(c.gdi, slotGdiGetDC, d2dDCInitializeCopy, uintptr(unsafe.Pointer(&dc)))) {
+		f(dc)
+		// GDI only read the bitmap.
+		var unchanged rect
+		call(c.gdi, slotGdiReleaseDC, uintptr(unsafe.Pointer(&unchanged)))
 	}
+	call(c.target, slotRTEndDraw, 0, 0)
 }
 
 // begin starts drawing the dirty part, in virtual screen pixels, cleared to

@@ -9,13 +9,14 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"unsafe"
 )
 
 // The index is saved to disk, so the next start loads it in a moment and
 // catches up from the change journal instead of reading every volume's
 // file table again.
 
-const snapshotMagic = "ARUFIDX2"
+const snapshotMagic = "ARUFIDX3"
 
 // saveSnapshot writes the volumes to path, through a temporary file so a
 // crash mid-write leaves the previous snapshot.
@@ -73,15 +74,34 @@ func writeVolume(w io.Writer, v *volume) error {
 	e.u64(uint64(v.nextUSN))
 	e.u32(uint32(len(v.off)))
 	e.u32(uint32(len(v.names)))
+	e.u32(uint32(len(v.casedAt)))
+	e.u32(uint32(len(v.cased)))
 	if _, err := w.Write(e.b); err != nil {
 		return err
 	}
-	for _, data := range []any{v.off, v.parent, v.rec, v.seq, v.flags, v.names, v.folded} {
-		if err := binary.Write(w, binary.LittleEndian, data); err != nil {
+	for _, data := range v.arrays() {
+		if _, err := w.Write(data); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// arrays returns the volume's arrays as their bytes in memory, which is
+// how they are saved: every platform the program runs on is little-endian,
+// and going through encoding/binary would copy each one first.
+func (v *volume) arrays() [][]byte {
+	return [][]byte{
+		raw(v.off), raw(v.parent), raw(v.rec), raw(v.seq), v.flags, v.names,
+		raw(v.casedAt), raw(v.casedOff), v.cased,
+	}
+}
+
+func raw[E uint16 | uint32](s []E) []byte {
+	if len(s) == 0 {
+		return nil
+	}
+	return unsafe.Slice((*byte)(unsafe.Pointer(&s[0])), len(s)*int(unsafe.Sizeof(s[0])))
 }
 
 // loadSnapshot reads the volumes saved at path. A snapshot saved with
@@ -136,32 +156,35 @@ func readVolume(r io.Reader) (*volume, error) {
 		return nil, err
 	}
 	var head struct {
-		JournalID uint64
-		NextUSN   int64
-		Entries   uint32
-		Names     uint32
+		JournalID  uint64
+		NextUSN    int64
+		Entries    uint32
+		Names      uint32
+		Cased      uint32
+		CasedNames uint32
 	}
 	if err := binary.Read(r, binary.LittleEndian, &head); err != nil {
 		return nil, err
 	}
 	v := newVolume(guid, mount, head.JournalID)
 	v.nextUSN = head.NextUSN
-	n := int(head.Entries)
+	n, c := int(head.Entries), int(head.Cased)
 	v.off, v.parent, v.rec = make([]uint32, n), make([]uint32, n), make([]uint32, n)
 	v.seq, v.flags = make([]uint16, n), make([]byte, n)
-	v.names, v.folded = make([]byte, head.Names), make([]byte, head.Names)
-	for _, data := range []any{v.off, v.parent, v.rec, v.seq, v.flags, v.names, v.folded} {
-		if err := binary.Read(r, binary.LittleEndian, data); err != nil {
+	v.names = make([]byte, head.Names)
+	v.casedAt, v.casedOff = make([]uint32, c), make([]uint32, c)
+	v.cased = make([]byte, head.CasedNames)
+	for _, data := range v.arrays() {
+		if _, err := io.ReadFull(r, data); err != nil {
 			return nil, err
 		}
 	}
-	for i := range v.off {
-		if v.flags[i]&flagDead != 0 {
+	for _, f := range v.flags {
+		if f&flagDead != 0 {
 			v.dead++
-			continue
 		}
-		v.index(i)
 	}
+	v.reindex()
 	return v, nil
 }
 

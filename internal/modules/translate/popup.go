@@ -66,10 +66,12 @@ type popup struct {
 	opens uint64
 }
 
-func newPopup(app *application.App, keep func() time.Duration) *popup {
+// newPopup loads the popup hidden, to be released if unused for unused.
+func newPopup(app *application.App, keep func() time.Duration, unused time.Duration) *popup {
 	p := &popup{app: app, keep: keep}
 	p.mu.Lock()
 	p.create()
+	p.scheduleRelease(unused)
 	p.mu.Unlock()
 	return p
 }
@@ -214,7 +216,12 @@ func (p *popup) hide() {
 	p.pinned = false
 	p.win.Hide()
 	p.win.EmitEvent(hiddenEvent)
-	keep := p.keep()
+	p.scheduleRelease(p.keep())
+}
+
+// scheduleRelease closes the hidden window once it has stayed unused for
+// keep, or never when keep is 0. p.mu must be held.
+func (p *popup) scheduleRelease(keep time.Duration) {
 	if keep <= 0 {
 		return
 	}

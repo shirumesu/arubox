@@ -122,7 +122,7 @@ func parseTerm(s string) []term {
 	for strings.HasPrefix(s, "!") {
 		not, s = !not, s[1:]
 	}
-	f := string(appendFolded(nil, s))
+	f := string(appendFolded(nil, []byte(s)))
 	switch {
 	case strings.HasPrefix(f, "ext:"):
 		var exts []string

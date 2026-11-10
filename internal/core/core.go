@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
 	"github.com/wailsapp/wails/v3/pkg/events"
@@ -31,6 +32,11 @@ const (
 	bundleID = "com.shirumesu.arubox"
 	// coreOwner owns the hotkeys of the main program itself.
 	coreOwner = "core"
+	// gcPercent lets the heap grow only a quarter past what is live before
+	// it is collected, not double. Most of what is live is the file index,
+	// which holds no pointers, so a collection costs little however large
+	// it is, and doubling it would keep tens of megabytes unused.
+	gcPercent = 25
 )
 
 // Core holds the running program.
@@ -46,6 +52,7 @@ type Core struct {
 // Run starts the program and blocks until it quits. assets is the built
 // frontend and css its stylesheet, which holds the design tokens.
 func Run(assets fs.FS, css []byte) error {
+	debug.SetGCPercent(gcPercent)
 	tokens, err := design.Parse(css)
 	if err != nil {
 		return err
@@ -94,6 +101,11 @@ func Run(assets fs.FS, css []byte) error {
 		},
 		Mac: application.MacOptions{
 			ActivationPolicy: application.ActivationPolicyAccessory,
+		},
+		Windows: application.WindowsOptions{
+			// Every window shows a page of the same site; one process
+			// renders them all, instead of one each.
+			AdditionalBrowserArgs: []string{"--process-per-site"},
 		},
 		SingleInstance: &application.SingleInstanceOptions{
 			UniqueID: bundleID,

@@ -141,7 +141,7 @@ export function TranslateSettingsPage({ state, mutate }: { state: State; mutate:
       <Section title="浮窗">
         <Row
           title="隐藏后保持就绪"
-          description="浮窗隐藏后在后台保留这么久，期间随叫随到；之后释放内存，下次打开需要重新加载。"
+          description="启动后或浮窗隐藏后，在后台保留这么久，期间随叫随到；之后释放内存，下次打开需要重新加载。"
         >
           <KeepReadySelect
             minutes={own.settings.keepMinutes}

@@ -59,6 +59,9 @@ const (
 	flagExcluded
 	// flagDead marks a deleted entry until the index is compacted.
 	flagDead
+	// flagCased marks, in the index only, an entry whose name has
+	// capitals.
+	flagCased
 )
 
 // maxFrame bounds a frame, so a corrupt length cannot make a reader

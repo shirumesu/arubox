@@ -3,6 +3,7 @@ package platform
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"math"
 	"runtime"
 	"sync"
@@ -291,8 +292,9 @@ type Desktop struct {
 	edit       *editBox
 	watch      uint32
 	watched    []string
-	dragging   bool        // the layer's own drag is under way
-	explorer   *iconLayout // where File Explorer had its icons
+	dragging   bool           // the layer's own drag is under way
+	explorer   *iconLayout    // where File Explorer had its icons
+	guard      windows.Handle // set when the desktop is given back, for the guard
 	done       chan struct{}
 }
 
@@ -335,6 +337,7 @@ func (d *Desktop) Detach() {
 		if d.explorer != nil {
 			_ = d.explorer.restore()
 		}
+		d.stopGuard()
 		procPostQuitMessage.Call(0)
 	})
 	<-d.done
@@ -482,6 +485,12 @@ func (d *Desktop) attach() error {
 			// Without Explorer's positions its icons are left where it
 			// puts them; the takeover goes on all the same.
 			d.explorer, _ = readIconLayout(folderView)
+		}
+		if d.guard == 0 {
+			if err := d.startGuard(); err != nil {
+				destroySurfaces(surfaces)
+				return fmt.Errorf("无法启动桌面图标的恢复程序：%w", err)
+			}
 		}
 		procShowWindow.Call(folderView, swHide)
 	}
@@ -665,27 +674,29 @@ func snapOut(b Box) Box {
 
 // present copies the canvas to the window; dirty limits it, nil copies all.
 func (d *Desktop) present(s *surface, dirty *rect) {
-	size := struct{ CX, CY int32 }{int32(s.canvas.width), int32(s.canvas.height)}
-	src := point{}
-	blend := [4]byte{0, 0, d.alpha, acSrcAlpha}
-	info := struct {
-		Size  uint32
-		Dst   uintptr
-		PtDst uintptr
-		PSize uintptr
-		Src   uintptr
-		PtSrc uintptr
-		Key   uint32
-		Blend uintptr
-		Flags uint32
-		Dirty uintptr
-	}{
-		PSize: uintptr(unsafe.Pointer(&size)), Src: s.canvas.dc, PtSrc: uintptr(unsafe.Pointer(&src)),
-		Blend: uintptr(unsafe.Pointer(&blend)), Flags: ulwAlpha, Dirty: uintptr(unsafe.Pointer(dirty)),
-	}
-	info.Size = uint32(unsafe.Sizeof(info))
-	procUpdateLayeredWindowIndir.Call(s.hwnd, uintptr(unsafe.Pointer(&info)))
-	runtime.KeepAlive(dirty)
+	s.canvas.withDC(func(dc uintptr) {
+		size := struct{ CX, CY int32 }{int32(s.canvas.width), int32(s.canvas.height)}
+		src := point{}
+		blend := [4]byte{0, 0, d.alpha, acSrcAlpha}
+		info := struct {
+			Size  uint32
+			Dst   uintptr
+			PtDst uintptr
+			PSize uintptr
+			Src   uintptr
+			PtSrc uintptr
+			Key   uint32
+			Blend uintptr
+			Flags uint32
+			Dirty uintptr
+		}{
+			PSize: uintptr(unsafe.Pointer(&size)), Src: dc, PtSrc: uintptr(unsafe.Pointer(&src)),
+			Blend: uintptr(unsafe.Pointer(&blend)), Flags: ulwAlpha, Dirty: uintptr(unsafe.Pointer(dirty)),
+		}
+		info.Size = uint32(unsafe.Sizeof(info))
+		procUpdateLayeredWindowIndir.Call(s.hwnd, uintptr(unsafe.Pointer(&info)))
+		runtime.KeepAlive(dirty)
+	})
 }
 
 // SetAlpha fades the whole layer, without drawing it again.

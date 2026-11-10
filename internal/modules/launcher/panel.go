@@ -45,10 +45,12 @@ type panel struct {
 	opens uint64
 }
 
-func newPanel(app *application.App, keep func() time.Duration) *panel {
+// newPanel loads the panel hidden, to be released if unused for unused.
+func newPanel(app *application.App, keep func() time.Duration, unused time.Duration) *panel {
 	p := &panel{app: app, keep: keep}
 	p.mu.Lock()
 	p.create()
+	p.scheduleRelease(unused)
 	p.mu.Unlock()
 	return p
 }
@@ -177,7 +179,12 @@ func (p *panel) hide() {
 		return
 	}
 	p.win.Hide()
-	keep := p.keep()
+	p.scheduleRelease(p.keep())
+}
+
+// scheduleRelease closes the hidden window once it has stayed unused for
+// keep, or never when keep is 0. p.mu must be held.
+func (p *panel) scheduleRelease(keep time.Duration) {
 	if keep <= 0 {
 		return
 	}

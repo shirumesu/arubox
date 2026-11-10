@@ -58,10 +58,13 @@ type overlay struct {
 	shows   uint64
 }
 
-func newOverlay(app *application.App, keep func() time.Duration, ended func()) *overlay {
+// newOverlay loads the overlay hidden, to be released if unused for
+// unused.
+func newOverlay(app *application.App, keep func() time.Duration, unused time.Duration, ended func()) *overlay {
 	o := &overlay{app: app, keep: keep, ended: ended}
 	o.mu.Lock()
 	o.create()
+	o.scheduleRelease(unused)
 	o.mu.Unlock()
 	return o
 }
@@ -168,7 +171,12 @@ func (o *overlay) hide() {
 	o.win.Hide()
 	o.win.EmitEvent(endEvent)
 	o.ended()
-	keep := o.keep()
+	o.scheduleRelease(o.keep())
+}
+
+// scheduleRelease closes the hidden window once it has stayed unused for
+// keep, or never when keep is 0. o.mu must be held.
+func (o *overlay) scheduleRelease(keep time.Duration) {
 	if keep <= 0 {
 		return
 	}

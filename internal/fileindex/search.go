@@ -103,7 +103,7 @@ func searchVolume(ctx context.Context, v *volume, q query, limit int) []hit {
 }
 
 // scanRange tests entries lo to hi. With an anchor word, it looks for the
-// word in the folded names as one block, which is much faster than
+// word in the names as one block, which is much faster than
 // testing each name, and tests only the entries it is found in.
 func scanRange(ctx context.Context, v *volume, q query, lo, hi int, out *top) {
 	test := func(i int) {
@@ -136,13 +136,13 @@ func scanRange(ctx context.Context, v *volume, q query, lo, hi int, out *top) {
 		return
 	}
 	anchor := []byte(q.anchor)
-	end := len(v.folded)
+	end := len(v.names)
 	if hi < len(v.off) {
 		end = int(v.off[hi])
 	}
 	pos, seen := int(v.off[lo]), 0
 	for pos < end {
-		k := bytes.Index(v.folded[pos:end], anchor)
+		k := bytes.Index(v.names[pos:end], anchor)
 		if k < 0 {
 			return
 		}

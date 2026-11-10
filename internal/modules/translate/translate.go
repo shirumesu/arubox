@@ -98,10 +98,11 @@ func (m *Module) Hotkeys() []hotkey.Def {
 func (m *Module) Enable(ctx module.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.popup = newPopup(ctx.App, m.keepTime)
+	m.popup = newPopup(ctx.App, m.keepTime, m.keepLocked())
 	c := &capture{app: ctx.App, keep: m.keepTime}
 	c.mu.Lock()
 	c.create()
+	c.scheduleRelease(m.keepLocked())
 	c.mu.Unlock()
 	m.capture = c
 	go platform.PrepareScreenCapture()
@@ -130,6 +131,11 @@ func (m *Module) Disable() error {
 func (m *Module) keepTime() time.Duration {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.keepLocked()
+}
+
+// keepLocked is keepTime with m.mu held.
+func (m *Module) keepLocked() time.Duration {
 	return time.Duration(m.settings.KeepMinutes) * time.Minute
 }
 

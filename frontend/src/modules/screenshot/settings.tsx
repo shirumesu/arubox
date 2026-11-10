@@ -66,7 +66,7 @@ export function ScreenshotSettingsPage({ state, mutate }: { state: State; mutate
       <Section title="编辑器">
         <Row
           title="隐藏后保持就绪"
-          description="截图编辑器关闭后在后台保留这么久，期间随叫随到；之后释放内存，下次截图需要重新加载。"
+          description="启动后或截图编辑器关闭后，在后台保留这么久，期间随叫随到；之后释放内存，下次截图需要重新加载。"
         >
           <KeepReadySelect
             minutes={own.settings.keepMinutes}

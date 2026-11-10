@@ -124,7 +124,7 @@ func (m *Module) Enable(ctx module.Context) error {
 	defer m.mu.Unlock()
 	m.app = ctx.App
 	m.pins.app = ctx.App
-	m.overlay = newOverlay(ctx.App, m.keepTime, m.dropImage)
+	m.overlay = newOverlay(ctx.App, m.keepTime, m.keepLocked(), m.dropImage)
 	go platform.PrepareScreenCapture()
 	return nil
 }
@@ -148,6 +148,11 @@ func (m *Module) Disable() error {
 func (m *Module) keepTime() time.Duration {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.keepLocked()
+}
+
+// keepLocked is keepTime with m.mu held.
+func (m *Module) keepLocked() time.Duration {
 	return time.Duration(m.stored.KeepMinutes) * time.Minute
 }
 
