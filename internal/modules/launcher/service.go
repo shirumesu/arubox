@@ -62,6 +62,24 @@ func (s *Service) Files(ctx context.Context, query string) []Result {
 	return s.module.searchFiles(ctx, query, maxFiles)
 }
 
+// FileIndex reports how far the file index is.
+func (s *Service) FileIndex() FileIndexStatus {
+	return s.module.fileIndexStatus()
+}
+
+// InstallFileIndex installs the Windows index service, asking the user for
+// administrator rights, or installs it again over an outdated one.
+func (s *Service) InstallFileIndex() (FileIndexStatus, error) {
+	err := s.module.changeFileIndex(true)
+	return s.module.fileIndexStatus(), err
+}
+
+// RemoveFileIndex removes the Windows index service and the index.
+func (s *Service) RemoveFileIndex() (FileIndexStatus, error) {
+	err := s.module.changeFileIndex(false)
+	return s.module.fileIndexStatus(), err
+}
+
 // Activate opens a result. reveal shows a file or folder in Finder or File
 // Explorer, or a translation in the translation popup, instead.
 func (s *Service) Activate(result Result, reveal bool) error {

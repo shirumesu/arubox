@@ -39,7 +39,7 @@ linters:
     rules:
       # System calls need unsafe pointers and fixed-width conversions; they
       # are confined to the platform layer.
-      - path: internal/platform/
+      - path: internal/(platform|fileindex)/
         linters: [gosec]
         text: "G103|G115"
 

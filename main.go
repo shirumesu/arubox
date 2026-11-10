@@ -14,6 +14,9 @@ import (
 var frontend embed.FS
 
 func main() {
+	if runHelper() {
+		return
+	}
 	assets, err := fs.Sub(frontend, "frontend/dist")
 	if err != nil {
 		log.Fatal(err)

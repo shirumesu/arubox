@@ -53,6 +53,9 @@ type Settings struct {
 	// FilesKeyword searches only files and folders, even with Files off.
 	// Empty turns it off.
 	FilesKeyword string `json:"filesKeyword"`
+	// FileExcludes are folders the Windows index leaves out: a full path,
+	// or a name that leaves out every folder so named.
+	FileExcludes []string `json:"fileExcludes"`
 }
 
 // stored is what the module keeps in the settings file: the settings and
@@ -71,6 +74,7 @@ func defaultStored() stored {
 		DefaultSearch:    "gg",
 		TranslateKeyword: "fy",
 		FilesKeyword:     "f",
+		FileExcludes:     slices.Clone(defaultFileExcludes),
 	}}
 }
 
@@ -103,6 +107,7 @@ type Module struct {
 	apps    []platform.App
 	scanned time.Time
 	icons   map[string]string // data URLs by app ID, extension or folder
+	files   *fileIndex        // nil while disabled
 }
 
 // New creates the module. It does nothing until enabled. translator may be
@@ -148,7 +153,12 @@ func (m *Module) Hotkeys() []hotkey.Def {
 // Enable loads the panel and the app list in the background, so the first
 // open is as fast as the others.
 func (m *Module) Enable(ctx module.Context) error {
+	files, err := newFileIndex(m.log, m.currentSettings().FileExcludes)
+	if err != nil {
+		return err
+	}
 	m.mu.Lock()
+	m.files = files
 	m.app = ctx.App
 	m.panel = newPanel(ctx.App, m.keepTime)
 	m.icons = map[string]string{}
@@ -157,12 +167,16 @@ func (m *Module) Enable(ctx module.Context) error {
 	return nil
 }
 
-// Disable closes the panel and drops the app list and icons.
+// Disable closes the panel, saves the file index and drops the app list
+// and icons.
 func (m *Module) Disable() error {
 	m.mu.Lock()
-	p := m.panel
-	m.panel, m.app, m.apps, m.icons, m.scanned = nil, nil, nil, nil, time.Time{}
+	p, files := m.panel, m.files
+	m.panel, m.app, m.apps, m.icons, m.scanned, m.files = nil, nil, nil, nil, time.Time{}, nil
 	m.mu.Unlock()
+	if files != nil {
+		files.stop()
+	}
 	if p != nil {
 		p.mu.Lock()
 		p.destroy()
@@ -306,17 +320,22 @@ func (m *Module) searchMore(ctx context.Context, query string) []Result {
 // query, recently opened ones first.
 func (m *Module) searchFiles(ctx context.Context, q string, n int) []Result {
 	q = strings.TrimSpace(q)
-	if q == "" {
+	m.mu.Lock()
+	files := m.files
+	m.mu.Unlock()
+	if q == "" || files == nil {
 		return nil
 	}
 	now := time.Now()
-	var matches []scored
-	for _, f := range platform.SearchFiles(q, fileCandidates) {
+	found := files.search(ctx, q, fileCandidates)
+	matches := make([]scored, 0, len(found))
+	for i, f := range found {
 		name := filepath.Base(f.Path)
-		if s := matchScore(q, name); s > 0 {
-			r := Result{Kind: kindFile, Key: f.Path, Title: name, Subtitle: displayDir(f.Path)}
-			matches = append(matches, scored{result: r, score: s + recencyBoost(f.LastUsed, now)})
-		}
+		// The index has matched the query, which may use a search syntax
+		// the name does not contain as text; its own order breaks ties.
+		s := max(matchScore(q, name), 1) + recencyBoost(f.LastUsed, now)
+		r := Result{Kind: kindFile, Key: f.Path, Title: name, Subtitle: displayDir(f.Path)}
+		matches = append(matches, scored{result: r, score: s*fileCandidates + len(found) - i})
 	}
 	if ctx.Err() != nil {
 		return nil
@@ -444,6 +463,13 @@ func (m *Module) setSettings(s Settings) error {
 	}
 	s.TranslateKeyword = strings.TrimSpace(s.TranslateKeyword)
 	s.FilesKeyword = strings.TrimSpace(s.FilesKeyword)
+	excludes := make([]string, 0, len(s.FileExcludes))
+	for _, e := range s.FileExcludes {
+		if e = strings.TrimSpace(e); e != "" && !slices.Contains(excludes, e) {
+			excludes = append(excludes, e)
+		}
+	}
+	s.FileExcludes = excludes
 	s.Keywords = slices.Clone(s.Keywords)
 	for i, k := range s.Keywords {
 		s.Keywords[i] = Keyword{Keyword: strings.TrimSpace(k.Keyword), Name: strings.TrimSpace(k.Name), URL: strings.TrimSpace(k.URL)}
@@ -452,12 +478,56 @@ func (m *Module) setSettings(s Settings) error {
 		return err
 	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	next := m.stored
 	next.Settings = s
 	if err := m.store.SetModuleSettings(id, next); err != nil {
+		m.mu.Unlock()
 		return errors.New("保存设置失败：" + err.Error())
 	}
 	m.stored = next
+	files := m.files
+	m.mu.Unlock()
+	if files != nil {
+		files.setExcluded(s.FileExcludes)
+	}
 	return nil
+}
+
+// FileIndexStatus describes the file index for the settings page.
+type FileIndexStatus struct {
+	// State is "off" while the launcher is disabled and "spotlight" on
+	// macOS. On Windows it is "missing", "stopped" or "outdated" when the
+	// index service needs installing, then "connecting", "indexing" or
+	// "ready".
+	State string `json:"state"`
+	// Files is how many files and folders are indexed.
+	Files int `json:"files"`
+	// Volumes are the indexed drives.
+	Volumes []string `json:"volumes"`
+	// Message explains a problem, such as a drive that cannot be read.
+	Message string `json:"message,omitempty"`
+}
+
+func (m *Module) fileIndexStatus() FileIndexStatus {
+	m.mu.Lock()
+	files := m.files
+	m.mu.Unlock()
+	if files == nil {
+		return FileIndexStatus{State: "off"}
+	}
+	return files.status()
+}
+
+// changeFileIndex installs the index service, or removes it.
+func (m *Module) changeFileIndex(install bool) error {
+	m.mu.Lock()
+	files := m.files
+	m.mu.Unlock()
+	if files == nil {
+		return errors.New("先启用启动器")
+	}
+	if install {
+		return files.install()
+	}
+	return files.remove()
 }

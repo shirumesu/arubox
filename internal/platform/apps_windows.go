@@ -179,10 +179,3 @@ func RevealFile(path string) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{CmdLine: `explorer.exe /select,"` + path + `"`}
 	_ = cmd.Start()
 }
-
-// SearchFiles finds files by name. On Windows, file search is to come from
-// arubox's own index of the NTFS file table, which does not exist yet, so
-// for now this finds nothing.
-func SearchFiles(string, int) []FoundFile {
-	return nil
-}
