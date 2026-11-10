@@ -1,11 +1,11 @@
 import { Clipboard, Events } from "@wailsio/runtime";
-import { Calculator, Search, SquareTerminal } from "lucide-react";
+import { Banknote, Calculator, Clock, Search, SquareTerminal, type LucideIcon } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
 
 import { Service, type Result } from "@bindings/modules/launcher";
 import { cn } from "cn";
 
-/** Waits this long after typing stops before searching files, which is slower. */
+/** Waits this long after typing stops before the slower search for files and rates. */
 const fileDelay = 120;
 
 export function Launcher() {
@@ -41,7 +41,7 @@ export function Launcher() {
       setSelected(0);
     }, console.error);
     fileSearch.current.timer = setTimeout(() => {
-      const call = Service.SearchFiles(q);
+      const call = Service.SearchMore(q);
       fileSearch.current.call = call;
       call.then((r) => {
         if (n === searches.current) setFiles(r ?? []);
@@ -107,12 +107,13 @@ export function Launcher() {
     // eslint-disable-next-line @typescript-eslint/no-deprecated
     if (e.nativeEvent.isComposing || e.keyCode === 229) return;
     setCopied(false);
-    // ⌘C (Ctrl+C) copies a calculation's result and keeps the panel open,
+    // ⌘C (Ctrl+C) copies a calculation's result, a conversion or a time and
+    // keeps the panel open,
     // so it can be pasted back to calculate on. With text selected in the
     // field, it copies that text as usual.
     const field = e.currentTarget;
     const copy = (mac ? e.metaKey : e.ctrlKey) && e.key.toLowerCase() === "c";
-    if (copy && current?.kind === "calc" && field.selectionStart === field.selectionEnd) {
+    if (copy && current && copyable(current) && field.selectionStart === field.selectionEnd) {
       e.preventDefault();
       Clipboard.SetText(current.key).then(() => {
         setCopied(true);
@@ -185,7 +186,7 @@ export function Launcher() {
           {current && (
             <footer className="flex h-8 shrink-0 items-center gap-4 border-t px-4 text-[11px] text-muted-foreground">
               <span>↑↓ 选择</span>
-              {current.kind === "calc" && <span>{copied ? "已复制" : mac ? "⌘C 复制" : "Ctrl+C 复制"}</span>}
+              {copyable(current) && <span>{copied ? "已复制" : mac ? "⌘C 复制" : "Ctrl+C 复制"}</span>}
               <span>↵ {actionName(current)}</span>
               {isPath && <span>{mac ? "⌘↵ 在访达中显示" : "Ctrl+↵ 在资源管理器中显示"}</span>}
               <span className="flex-1" />
@@ -198,10 +199,16 @@ export function Launcher() {
   );
 }
 
+/** Calculations, conversions and times are values to copy. */
+function copyable(r: Result): boolean {
+  return (r.kind === "calc" || r.kind === "currency" || r.kind === "time") && r.key !== "";
+}
+
+const kindIcons: Record<string, LucideIcon> = { calc: Calculator, currency: Banknote, time: Clock };
+
 function actionName(r: Result): string {
+  if (copyable(r)) return "复制并关闭";
   switch (r.kind) {
-    case "calc":
-      return "复制并关闭";
     case "command":
       return "运行";
     default:
@@ -245,7 +252,7 @@ function Row({
 
 function ResultIcon({ result }: { result: Result }) {
   if (result.icon) return <img src={result.icon} alt="" className="size-7 shrink-0" draggable={false} />;
-  const Icon = result.kind === "calc" ? Calculator : SquareTerminal;
+  const Icon = kindIcons[result.kind] ?? SquareTerminal;
   return (
     <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
       <Icon className="size-4" />

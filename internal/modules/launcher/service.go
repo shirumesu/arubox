@@ -13,13 +13,15 @@ type Service struct {
 // SettingsState is everything the settings page shows.
 type SettingsState struct {
 	Settings Settings `json:"settings"`
+	// Currencies are the codes a home currency can be chosen from.
+	Currencies []string `json:"currencies"`
 	// Platform is the GOOS value: "darwin" or "windows".
 	Platform string `json:"platform"`
 }
 
 // State returns the settings.
 func (s *Service) State() SettingsState {
-	return SettingsState{Settings: s.module.currentSettings(), Platform: runtime.GOOS}
+	return SettingsState{Settings: s.module.currentSettings(), Currencies: currencies, Platform: runtime.GOOS}
 }
 
 // SetSettings saves new settings.
@@ -34,10 +36,10 @@ func (s *Service) Search(query string) []Result {
 	return s.module.search(query)
 }
 
-// SearchFiles returns the files and folders whose name matches. It takes
-// longer than Search, and a newer query cancels it through ctx.
-func (s *Service) SearchFiles(ctx context.Context, query string) []Result {
-	return s.module.searchFiles(ctx, query)
+// SearchMore returns the results that take longer than Search's: a currency
+// conversion and the matching files. A newer query cancels it through ctx.
+func (s *Service) SearchMore(ctx context.Context, query string) []Result {
+	return s.module.searchMore(ctx, query)
 }
 
 // Activate opens a result. reveal shows a file or folder in Finder or File

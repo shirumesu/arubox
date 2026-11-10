@@ -11,16 +11,19 @@ import (
 
 // The kinds of result.
 const (
-	kindApp     = "app"
-	kindFile    = "file"
-	kindFolder  = "folder"
-	kindCalc    = "calc"
-	kindCommand = "command"
+	kindApp      = "app"
+	kindFile     = "file"
+	kindFolder   = "folder"
+	kindCalc     = "calc"
+	kindCurrency = "currency"
+	kindTime     = "time"
+	kindCommand  = "command"
 )
 
 // Result is one row of the launcher.
 type Result struct {
-	// Kind is "app", "file", "folder", "calc" or "command".
+	// Kind is "app", "file", "folder", "calc", "currency", "time" or
+	// "command". Calculations, conversions and times copy their Key.
 	Kind string `json:"kind"`
 	// Key is what the result acts on: an app ID, a path, a calculated value
 	// or a command.
@@ -122,15 +125,23 @@ func inOrder(text, query string) bool {
 }
 
 // matchScore rates the best of several names, such as an app's name and
-// alias, against a query.
+// alias, against a query. Chinese names also match by their pinyin
+// initials, a little below a match of the name itself.
 func matchScore(query string, names ...string) int {
 	q := strings.ToLower(strings.TrimSpace(query))
 	best := 0
 	for _, n := range names {
 		best = max(best, score(n, q))
+		if p := pinyinInitials(n); p != "" {
+			best = max(best, score(p, q)-pinyinPenalty)
+		}
 	}
 	return best
 }
+
+// pinyinPenalty ranks a match of a name's pinyin initials below the same
+// kind of match of the name itself.
+const pinyinPenalty = 50
 
 // launchBoost lifts what the user opens often, without letting it beat a
 // clearly better match.

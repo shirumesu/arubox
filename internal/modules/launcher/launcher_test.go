@@ -1,7 +1,9 @@
 package launcher
 
 import (
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
 )
@@ -16,6 +18,7 @@ func TestScoreOrder(t *testing.T) {
 		{"vsc", []string{"Visual Studio Code", "VS Clip"}},
 		{"chat", []string{"Chat", "WeChat", "Snapchatter"}},
 		{"音乐", []string{"音乐", "网易云音乐"}},
+		{"wx", []string{"微信", "Wx Helper Tools"}},
 	}
 	for _, c := range cases {
 		for i := 1; i < len(c.names); i++ {
@@ -76,5 +79,68 @@ func TestPlace(t *testing.T) {
 	}
 	if got := place(2000, area); got.Y != 25 || got.Height != 875 {
 		t.Errorf("huge place = %+v", got)
+	}
+}
+
+func TestPinyinInitials(t *testing.T) {
+	for name, want := range map[string]string{"微信": "wx", "哔哩哔哩": "blbl", "QQ音乐": "qqyl", "Safari": "", "系统设置": "xtsz"} {
+		if got := pinyinInitials(name); got != want {
+			t.Errorf("pinyinInitials(%q) = %q, want %q", name, got, want)
+		}
+	}
+	if matchScore("xtsz", "系统设置") == 0 || matchScore("wyy", "网易云音乐") == 0 {
+		t.Error("pinyin initials did not match")
+	}
+}
+
+func TestParseConversion(t *testing.T) {
+	cases := map[string]conversion{
+		"100 usd":          {100, "USD", ""},
+		"$100":             {100, "USD", ""},
+		"100美元":            {100, "USD", ""},
+		"1,000 jpy to cny": {1000, "JPY", "CNY"},
+		"50 欧元换人民币":        {50, "EUR", "CNY"},
+		"¥20.5":            {20.5, "CNY", ""},
+	}
+	for q, want := range cases {
+		got, ok := parseConversion(q)
+		if !ok || got != want {
+			t.Errorf("%q = %+v, %v; want %+v", q, got, ok, want)
+		}
+	}
+	for _, q := range []string{"100", "3 pcs", "2024年", "usd", "1+2", "100 usd to xyz"} {
+		if c, ok := parseConversion(q); ok {
+			t.Errorf("%q parsed as %+v", q, c)
+		}
+	}
+}
+
+func TestConvert(t *testing.T) {
+	perEuro := map[string]float64{"EUR": 1, "USD": 1.1, "CNY": 7.7, "JPY": 165}
+	got := convert(conversion{amount: 11, from: "USD"}, perEuro, "2026-11-09", "CNY")
+	if len(got) != 2 || got[0].Title != "77.00 CNY" || got[1].Title != "10.00 EUR" {
+		t.Errorf("into home and euro: %+v", got)
+	}
+	got = convert(conversion{amount: 1, from: "EUR", to: "JPY"}, perEuro, "2026-11-09", "CNY")
+	if len(got) != 1 || got[0].Key != "165.00" {
+		t.Errorf("into a named target: %+v", got)
+	}
+}
+
+func TestWorldTime(t *testing.T) {
+	now := time.Date(2026, 11, 10, 6, 30, 0, 0, time.UTC)
+	for _, q := range []string{"东京时间", "tokyo time", "time in tokyo", "东京", "东京现在几点"} {
+		r, ok := worldTime(q, now)
+		if !ok || r.Key != "15:30" || !strings.Contains(r.Subtitle, "UTC+9") {
+			t.Errorf("%q = %+v, %v", q, r, ok)
+		}
+	}
+	if r, ok := worldTime("la time", now); !ok || r.Key != "22:30" {
+		t.Errorf("la time = %+v, %v", r, ok)
+	}
+	for _, q := range []string{"la", "safari", "time", "rome"} {
+		if r, ok := worldTime(q, now); ok {
+			t.Errorf("%q answered %+v", q, r)
+		}
 	}
 }

@@ -8,9 +8,11 @@ import (
 	"errors"
 	"log/slog"
 	"maps"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -34,6 +36,9 @@ type Store interface {
 type Settings struct {
 	// Files searches files and folders by name as well as apps.
 	Files bool `json:"files"`
+	// Currency is the home currency amounts are converted into, as an ISO
+	// code.
+	Currency string `json:"currency"`
 	// KeepMinutes is how long the hidden panel is kept ready before its
 	// memory is released. 0 keeps it for good.
 	KeepMinutes int `json:"keepMinutes"`
@@ -47,7 +52,7 @@ type stored struct {
 }
 
 func defaultStored() stored {
-	return stored{Settings: Settings{Files: true, KeepMinutes: 30}}
+	return stored{Settings: Settings{Files: true, Currency: "CNY", KeepMinutes: 30}}
 }
 
 const (
@@ -68,6 +73,8 @@ type Module struct {
 	store Store
 	log   *slog.Logger
 
+	rates *rates
+
 	mu      sync.Mutex
 	stored  stored
 	panel   *panel // nil while disabled
@@ -84,7 +91,11 @@ func New(store Store, log *slog.Logger) *Module {
 		log.Warn("launcher settings unreadable, using defaults", "error", err)
 		s = defaultStored()
 	}
-	return &Module{store: store, log: log, stored: s}
+	client := &http.Client{
+		Timeout:   10 * time.Second,
+		Transport: &http.Transport{Proxy: platform.SystemProxy, ForceAttemptHTTP2: true},
+	}
+	return &Module{store: store, log: log, stored: s, rates: &rates{client: client}}
 }
 
 // Info describes the module.
@@ -92,7 +103,7 @@ func (m *Module) Info() module.Info {
 	return module.Info{
 		ID:          id,
 		Name:        "启动器",
-		Description: "搜索并打开应用和文件，计算算式，用 ! 开头运行命令。",
+		Description: "搜索并打开应用和文件，计算算式、换算汇率、查看世界时间，用 ! 开头运行命令。",
 		Platforms:   []string{"darwin", "windows"},
 	}
 }
@@ -202,8 +213,8 @@ func (m *Module) icon(key, target string) string {
 	return url
 }
 
-// search returns the instant results for a query: a command, a calculation
-// and the matching apps.
+// search returns the instant results for a query: a command, a calculation,
+// the time in a city and the matching apps.
 func (m *Module) search(query string) []Result {
 	q := strings.TrimSpace(query)
 	if q == "" {
@@ -219,6 +230,9 @@ func (m *Module) search(query string) []Result {
 	if v, ok := calculate(q); ok {
 		value := formatNumber(v)
 		results = append(results, Result{Kind: kindCalc, Key: value, Title: value, Subtitle: "计算结果"})
+	}
+	if r, ok := worldTime(q, time.Now()); ok {
+		results = append(results, r)
 	}
 	m.mu.Lock()
 	apps, launches := m.apps, m.stored.Launches
@@ -241,16 +255,34 @@ func (m *Module) search(query string) []Result {
 	return results
 }
 
-// searchFiles returns the files and folders whose name matches the query,
-// recently opened ones first.
-func (m *Module) searchFiles(ctx context.Context, query string) []Result {
+// searchMore returns the results that take a while: a currency conversion,
+// which may need the day's rates, and the matching files.
+func (m *Module) searchMore(ctx context.Context, query string) []Result {
 	q := strings.TrimSpace(query)
 	m.mu.Lock()
-	on := m.stored.Files
+	s := m.stored.Settings
 	m.mu.Unlock()
-	if !on || len([]rune(q)) < 2 || strings.HasPrefix(q, "!") {
+	if strings.HasPrefix(q, "!") {
 		return nil
 	}
+	var results []Result
+	if c, ok := parseConversion(q); ok {
+		perEuro, date, err := m.rates.get(ctx)
+		if err != nil {
+			results = append(results, Result{Kind: kindCurrency, Title: "无法获取汇率", Subtitle: err.Error()})
+		} else {
+			results = append(results, convert(c, perEuro, date, s.Currency)...)
+		}
+	}
+	if s.Files && len([]rune(q)) >= 2 {
+		results = append(results, m.searchFiles(ctx, q)...)
+	}
+	return results
+}
+
+// searchFiles returns the files and folders whose name matches the query,
+// recently opened ones first.
+func (m *Module) searchFiles(ctx context.Context, q string) []Result {
 	now := time.Now()
 	var matches []scored
 	for _, f := range platform.SearchFiles(q, fileCandidates) {
@@ -307,7 +339,10 @@ func (m *Module) activate(r Result, reveal bool) error {
 			return nil
 		}
 		return platform.OpenFile(r.Key)
-	case kindCalc:
+	case kindCalc, kindCurrency, kindTime:
+		if r.Key == "" {
+			return nil
+		}
 		m.mu.Lock()
 		app := m.app
 		m.mu.Unlock()
@@ -348,6 +383,9 @@ func (m *Module) currentSettings() Settings {
 func (m *Module) setSettings(s Settings) error {
 	if s.KeepMinutes < 0 {
 		return errors.New("保留时间不能为负数")
+	}
+	if !slices.Contains(currencies, s.Currency) {
+		return errors.New("不支持这种货币")
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
