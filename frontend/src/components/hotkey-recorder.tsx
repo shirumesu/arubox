@@ -37,9 +37,13 @@ export function HotkeyRecorder({
   const [recording, setRecording] = useState(false);
   const [held, setHeld] = useState<string[]>([]);
   const recordingRef = useRef(false);
+  const buttonRef = useRef<HTMLButtonElement>(null);
 
   const start = () => {
     if (recordingRef.current) return;
+    // WebKit on macOS does not focus a button that is clicked, and the key
+    // events would go to <body> instead.
+    buttonRef.current?.focus();
     recordingRef.current = true;
     setRecording(true);
     void DashboardService.BeginHotkeyRecording();
@@ -91,6 +95,7 @@ export function HotkeyRecorder({
 
   return (
     <button
+      ref={buttonRef}
       type="button"
       onClick={start}
       onBlur={stop}
