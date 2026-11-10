@@ -37,10 +37,16 @@ export function HotkeyRecorder({
   const [recording, setRecording] = useState(false);
   const [held, setHeld] = useState<string[]>([]);
   const recordingRef = useRef(false);
+  // The keys held down, by code. Once a combination is recorded, the hotkeys
+  // stay released until all of them are let go: re-registered while still
+  // held, the next key repeat would trigger the hotkey on Windows.
+  const pressed = useRef(new Set<string>());
+  // The save of a recorded combination whose keys are still held.
+  const saving = useRef<Promise<unknown> | null>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
 
   const start = () => {
-    if (recordingRef.current) return;
+    if (recordingRef.current || saving.current) return;
     // WebKit on macOS does not focus a button that is clicked, and the key
     // events would go to <body> instead.
     buttonRef.current?.focus();
@@ -54,21 +60,34 @@ export function HotkeyRecorder({
     recordingRef.current = false;
     setRecording(false);
     setHeld([]);
+    pressed.current.clear();
     void DashboardService.EndHotkeyRecording();
+  };
+
+  // The recorded combination's keys are released: register the hotkeys again
+  // once the new binding is saved.
+  const released = () => {
+    const save = saving.current;
+    if (!save) return;
+    saving.current = null;
+    pressed.current.clear();
+    void save.finally(() => void DashboardService.EndHotkeyRecording());
   };
 
   // Never leave the hotkeys released if the row disappears mid-recording.
   useEffect(
     () => () => {
-      if (recordingRef.current) void DashboardService.EndHotkeyRecording();
+      if (recordingRef.current || saving.current) void DashboardService.EndHotkeyRecording();
     },
     [],
   );
 
   const onKeyDown = (e: KeyboardEvent<HTMLButtonElement>) => {
-    if (!recordingRef.current) return;
+    if (!recordingRef.current && !saving.current) return;
     e.preventDefault();
     e.stopPropagation();
+    pressed.current.add(e.code);
+    if (saving.current) return;
     const mods = modifiersOf(e.nativeEvent);
     const key = keyOf(e.nativeEvent);
     if (key === "escape" && mods.length === 0) {
@@ -79,17 +98,22 @@ export function HotkeyRecorder({
       setHeld(mods.map((m) => formatModifier(m, platform)));
       return;
     }
-    // Stop listening, but keep the hotkeys released until the new binding is
-    // saved: the Go side resumes them with the new binding in place.
+    // Stop recording, but keep the hotkeys released until the new binding is
+    // saved and the keys are let go: the Go side then resumes them with the
+    // new binding in place.
     recordingRef.current = false;
     setRecording(false);
     setHeld([]);
-    void onRecord([...mods, key].join("+")).finally(() => void DashboardService.EndHotkeyRecording());
+    saving.current = onRecord([...mods, key].join("+"));
   };
 
   const onKeyUp = (e: KeyboardEvent<HTMLButtonElement>) => {
+    if (!recordingRef.current && !saving.current) return;
+    pressed.current.delete(e.code);
     if (recordingRef.current) {
       setHeld(modifiersOf(e.nativeEvent).map((m) => formatModifier(m, platform)));
+    } else if (pressed.current.size === 0) {
+      released();
     }
   };
 
@@ -98,7 +122,10 @@ export function HotkeyRecorder({
       ref={buttonRef}
       type="button"
       onClick={start}
-      onBlur={stop}
+      onBlur={() => {
+        stop();
+        released();
+      }}
       onKeyDown={onKeyDown}
       onKeyUp={onKeyUp}
       className={cn(
