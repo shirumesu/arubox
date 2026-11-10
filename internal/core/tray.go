@@ -22,8 +22,14 @@ func setupTray(c *Core) {
 	tray := c.app.SystemTray.New()
 	tray.SetTooltip(appName)
 
+	// Tray callbacks run on the UI thread. On Windows, creating the dashboard
+	// window pumps messages while WebView2 starts, so a second click arriving
+	// then would call open again on the same thread and deadlock on its lock.
+	// Opening from a goroutine leaves the UI thread free.
+	openDashboard := func() { go c.dashboard.open() }
+
 	menu := application.NewMenu()
-	menu.Add("打开仪表盘").OnClick(func(*application.Context) { c.dashboard.open() })
+	menu.Add("打开仪表盘").OnClick(func(*application.Context) { openDashboard() })
 	menu.AddSeparator()
 	menu.Add("退出 " + appName).OnClick(func(*application.Context) { c.app.Quit() })
 	tray.SetMenu(menu)
@@ -35,5 +41,5 @@ func setupTray(c *Core) {
 	}
 	// On Windows a left click opens the dashboard and a right click the menu.
 	tray.SetIcon(trayColour)
-	tray.OnClick(c.dashboard.open)
+	tray.OnClick(openDashboard)
 }
