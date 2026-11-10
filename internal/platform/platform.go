@@ -6,6 +6,8 @@ package platform
 import (
 	"errors"
 	"time"
+
+	"github.com/wailsapp/wails/v3/pkg/application"
 )
 
 // ErrNoAccessibility is returned when macOS has not granted the accessibility
@@ -45,3 +47,40 @@ type FoundFile struct {
 	// LastUsed is when the user last opened it, or zero if unknown.
 	LastUsed time.Time
 }
+
+// Image is a picture of the screen as top-down BGRA pixels.
+type Image struct {
+	Pixels        []byte
+	Width, Height int
+}
+
+// Crop returns the part of img inside the rectangle at x, y of the given
+// size, in its pixels and clipped to it.
+func (img Image) Crop(x, y, width, height int) Image {
+	x0, y0 := max(x, 0), max(y, 0)
+	x1, y1 := min(x+width, img.Width), min(y+height, img.Height)
+	if x1 <= x0 || y1 <= y0 {
+		return Image{}
+	}
+	out := Image{Width: x1 - x0, Height: y1 - y0}
+	out.Pixels = make([]byte, 0, out.Width*out.Height*4)
+	for row := y0; row < y1; row++ {
+		start := (row*img.Width + x0) * 4
+		out.Pixels = append(out.Pixels, img.Pixels[start:start+out.Width*4]...)
+	}
+	return out
+}
+
+// ScreenText reads the text shown inside r, leaving out arubox's own windows.
+// Line boxes are in pixels of the captured picture.
+func ScreenText(r application.Rect) ([]TextLine, error) {
+	img, err := CaptureScreen(r)
+	if err != nil {
+		return nil, err
+	}
+	return ImageText(img)
+}
+
+// minWindowSize leaves out windows too small to be worth capturing, such as
+// invisible helpers.
+const minWindowSize = 40

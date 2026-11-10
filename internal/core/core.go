@@ -17,6 +17,7 @@ import (
 	"github.com/shirumesu/arubox/internal/logging"
 	"github.com/shirumesu/arubox/internal/module"
 	"github.com/shirumesu/arubox/internal/modules/launcher"
+	"github.com/shirumesu/arubox/internal/modules/screenshot"
 	"github.com/shirumesu/arubox/internal/modules/translate"
 )
 
@@ -69,6 +70,7 @@ func Run(assets fs.FS) error {
 	modules := []module.Module{
 		translator,
 		launcher.New(store, log, launcherTranslator{translator}),
+		screenshot.New(store, log, screenshotTranslator{translator}),
 	}
 	services := []application.Service{application.NewService(&DashboardService{core: c})}
 	for _, m := range modules {

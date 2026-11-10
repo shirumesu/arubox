@@ -110,9 +110,11 @@ func globalBytes(format uintptr) ([]byte, bool) {
 	return append([]byte(nil), unsafe.Slice((*byte)(p), size)...), true
 }
 
-func restoreClipboard(owner uintptr, items []clipboardItem) {
+// restoreClipboard replaces the clipboard's contents with items. It reports
+// whether the clipboard could be opened.
+func restoreClipboard(owner uintptr, items []clipboardItem) bool {
 	if !openClipboard(owner) {
-		return
+		return false
 	}
 	defer procCloseClipboard.Call()
 	procEmptyClipboard.Call()
@@ -130,6 +132,7 @@ func restoreClipboard(owner uintptr, items []clipboardItem) {
 			procGlobalFree.Call(h)
 		}
 	}
+	return true
 }
 
 func clipboardText(owner uintptr) string {

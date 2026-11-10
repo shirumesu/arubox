@@ -25,3 +25,13 @@ func (t launcherTranslator) Translate(ctx context.Context, text string) (launche
 func (t launcherTranslator) Open(text string) {
 	t.module.OpenText(text)
 }
+
+// screenshotTranslator lets the screenshot module show text in the
+// translation popup.
+type screenshotTranslator struct {
+	module *translate.Module
+}
+
+func (t screenshotTranslator) Available() bool { return t.module.Available() }
+
+func (t screenshotTranslator) Open(text string) { t.module.OpenText(text) }

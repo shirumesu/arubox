@@ -26,6 +26,8 @@ export default defineConfig({
         translator: fileURLToPath(new URL("./translator.html", import.meta.url)),
         capture: fileURLToPath(new URL("./capture.html", import.meta.url)),
         launcher: fileURLToPath(new URL("./launcher.html", import.meta.url)),
+        screenshot: fileURLToPath(new URL("./screenshot.html", import.meta.url)),
+        pin: fileURLToPath(new URL("./pin.html", import.meta.url)),
       },
     },
   },

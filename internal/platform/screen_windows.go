@@ -78,20 +78,28 @@ func RequestScreenCapture() {}
 // OpenScreenCaptureSettings does nothing on Windows.
 func OpenScreenCaptureSettings() {}
 
-// ScreenText reads the text shown inside r with the system's OCR. Line boxes
-// are in pixels of the captured picture.
-func ScreenText(r application.Rect) ([]TextLine, error) {
+// CaptureScreen takes a picture of r at the screen's full resolution.
+func CaptureScreen(r application.Rect) (Image, error) {
 	// Let the screen drop windows that were just hidden before taking it.
 	procDwmFlush.Call()
 	p := application.DipToPhysicalRect(r)
 	if p.Width <= 0 || p.Height <= 0 {
-		return nil, nil
+		return Image{}, errors.New("截取屏幕失败")
 	}
 	pixels, err := capturePixels(p)
 	if err != nil {
-		return nil, err
+		return Image{}, err
 	}
-	return recognize(pixels, p.Width, p.Height)
+	return Image{Pixels: pixels, Width: p.Width, Height: p.Height}, nil
+}
+
+// ImageText reads the lines of text in a picture with the system's OCR.
+// Line boxes are in its pixels.
+func ImageText(img Image) ([]TextLine, error) {
+	if img.Width <= 0 || img.Height <= 0 || len(img.Pixels) < img.Width*img.Height*4 {
+		return nil, nil
+	}
+	return recognize(img.Pixels, img.Width, img.Height)
 }
 
 type bitmapInfo struct {

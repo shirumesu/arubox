@@ -192,7 +192,7 @@ func (m *Module) readScreen(area application.Rect) {
 		return
 	}
 	lines, err := platform.ScreenText(c.finish(area))
-	text := paragraphs(lines)
+	text := platform.Paragraphs(lines)
 	switch {
 	case errors.Is(err, platform.ErrNoScreenCapture):
 		p.open(screenPermissionRequest)
@@ -241,6 +241,11 @@ func (m *Module) TranslateText(ctx context.Context, text string) (Translation, s
 		engine = "DeepL"
 	}
 	return t, engine, err
+}
+
+// Available reports whether the module is on, for other modules.
+func (m *Module) Available() bool {
+	return m.currentPopup() != nil
 }
 
 // OpenText shows text, translated, in the popup.

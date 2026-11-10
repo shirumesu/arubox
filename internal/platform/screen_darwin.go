@@ -8,6 +8,7 @@ package platform
 #import <ScreenCaptureKit/ScreenCaptureKit.h>
 #import <Vision/Vision.h>
 #include <unistd.h>
+#include <stdlib.h>
 
 typedef struct {
 	char *text;
@@ -142,17 +143,62 @@ typedef struct {
 	int code;
 	textLine *lines;
 	int count;
-} screenResult;
+} textResult;
 
-static screenResult screenText(double x, double y, double width, double height) {
-	screenResult result = {0};
+typedef struct {
+	int code;
+	void *pixels;
+	int width, height;
+} pixelsResult;
+
+// capturePixels takes a picture of a rectangle of the screen as top-down
+// BGRA pixels in sRGB. The caller frees them.
+static pixelsResult capturePixels(double x, double y, double width, double height) {
+	pixelsResult result = {0};
 	@autoreleasepool {
 		CGImageRef image = NULL;
 		result.code = captureRect(CGRectMake(x, y, width, height), &image);
-		if (result.code == screenOK) {
-			result.code = recognize(image, &result.lines, &result.count);
-			CGImageRelease(image);
+		if (result.code != screenOK) {
+			return result;
 		}
+		size_t w = CGImageGetWidth(image), h = CGImageGetHeight(image);
+		void *pixels = malloc(w * h * 4);
+		CGColorSpaceRef srgb = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+		CGContextRef context = CGBitmapContextCreate(pixels, w, h, 8, w * 4, srgb,
+			kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little);
+		CGColorSpaceRelease(srgb);
+		if (context == NULL) {
+			free(pixels);
+			CGImageRelease(image);
+			result.code = screenFailed;
+			return result;
+		}
+		CGContextDrawImage(context, CGRectMake(0, 0, w, h), image);
+		CGContextRelease(context);
+		CGImageRelease(image);
+		result.pixels = pixels;
+		result.width = (int)w;
+		result.height = (int)h;
+	}
+	return result;
+}
+
+// imageText reads the lines of text in top-down BGRA pixels.
+static textResult imageText(void *pixels, int width, int height) {
+	textResult result = {0};
+	@autoreleasepool {
+		CGDataProviderRef provider = CGDataProviderCreateWithData(NULL, pixels, (size_t)width * height * 4, NULL);
+		CGColorSpaceRef srgb = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+		CGImageRef image = CGImageCreate(width, height, 8, 32, (size_t)width * 4, srgb,
+			kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little, provider, NULL, false, kCGRenderingIntentDefault);
+		CGColorSpaceRelease(srgb);
+		CGDataProviderRelease(provider);
+		if (image == NULL) {
+			result.code = screenFailed;
+			return result;
+		}
+		result.code = recognize(image, &result.lines, &result.count);
+		CGImageRelease(image);
 	}
 	return result;
 }
@@ -191,16 +237,31 @@ func OpenScreenCaptureSettings() {
 	C.openScreenCaptureSettings()
 }
 
-// ScreenText reads the text shown inside r, leaving out arubox's own windows.
-// Line boxes are in pixels of the captured picture.
-func ScreenText(r application.Rect) ([]TextLine, error) {
-	res := C.screenText(C.double(r.X), C.double(r.Y), C.double(r.Width), C.double(r.Height))
+// CaptureScreen takes a picture of r, leaving out arubox's own windows, at
+// the screen's full resolution.
+func CaptureScreen(r application.Rect) (Image, error) {
+	res := C.capturePixels(C.double(r.X), C.double(r.Y), C.double(r.Width), C.double(r.Height))
 	switch res.code {
 	case C.screenOK:
 	case C.screenDenied:
-		return nil, ErrNoScreenCapture
+		return Image{}, ErrNoScreenCapture
 	default:
-		return nil, errors.New("截取屏幕或识别文字失败")
+		return Image{}, errors.New("截取屏幕失败")
+	}
+	defer C.free(res.pixels)
+	w, h := int(res.width), int(res.height)
+	return Image{Pixels: C.GoBytes(res.pixels, C.int(w*h*4)), Width: w, Height: h}, nil
+}
+
+// ImageText reads the lines of text in a picture. Line boxes are in its
+// pixels.
+func ImageText(img Image) ([]TextLine, error) {
+	if img.Width <= 0 || img.Height <= 0 || len(img.Pixels) < img.Width*img.Height*4 {
+		return nil, nil
+	}
+	res := C.imageText(unsafe.Pointer(&img.Pixels[0]), C.int(img.Width), C.int(img.Height))
+	if res.code != C.screenOK {
+		return nil, errors.New("识别文字失败")
 	}
 	defer C.freeLines(res.lines, res.count)
 	result := make([]TextLine, 0, int(res.count))

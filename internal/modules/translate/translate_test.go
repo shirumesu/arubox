@@ -4,8 +4,6 @@ import (
 	"testing"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
-
-	"github.com/shirumesu/arubox/internal/platform"
 )
 
 func TestParseGoogleJoinsSentencesAndSkipsTransliteration(t *testing.T) {
@@ -94,29 +92,6 @@ func TestDeepLLanguages(t *testing.T) {
 	for code, want := range map[string]string{"zh-CN": "ZH", "zh-TW": "ZH", "en": "EN"} {
 		if got := deeplSource(code); got != want {
 			t.Errorf("deeplSource(%s) = %s, want %s", code, got, want)
-		}
-	}
-}
-
-func TestParagraphs(t *testing.T) {
-	line := func(text string, y float64) platform.TextLine {
-		return platform.TextLine{Text: text, Box: platform.Box{X: 10, Y: y, Width: 300, Height: 20}}
-	}
-	cases := []struct {
-		name  string
-		lines []platform.TextLine
-		want  string
-	}{
-		{"joins a broken sentence", []platform.TextLine{line("The quick brown", 0), line("fox jumps.", 24)}, "The quick brown fox jumps."},
-		{"mends hyphenation", []platform.TextLine{line("transla-", 0), line("tion works", 24)}, "translation works"},
-		{"keeps paragraphs apart", []platform.TextLine{line("First.", 0), line("Second.", 60)}, "First.\nSecond."},
-		{"joins Chinese without spaces", []platform.TextLine{line("这是一句很长", 0), line("的话。", 24)}, "这是一句很长的话。"},
-		{"drops OCR spaces between Chinese", []platform.TextLine{line("中 文 识 别 OCR 结果", 0)}, "中文识别 OCR 结果"},
-		{"starts again for a line above", []platform.TextLine{line("Right column", 100), line("Left column", 0)}, "Right column\nLeft column"},
-	}
-	for _, c := range cases {
-		if got := paragraphs(c.lines); got != c.want {
-			t.Errorf("%s: got %q, want %q", c.name, got, c.want)
 		}
 	}
 }

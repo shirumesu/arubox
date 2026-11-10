@@ -1,20 +1,18 @@
-package translate
+package platform
 
 import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
-
-	"github.com/shirumesu/arubox/internal/platform"
 )
 
-// paragraphs joins lines read off the screen into the text to translate.
+// Paragraphs joins lines read off the screen into the text to translate.
 // Lines close below each other belong to one paragraph and are joined, so a
 // sentence broken across lines is translated as one; a wider gap, or a line
 // that does not follow below, starts a new paragraph.
-func paragraphs(lines []platform.TextLine) string {
+func Paragraphs(lines []TextLine) string {
 	var b strings.Builder
-	var prev platform.Box
+	var prev Box
 	for _, line := range lines {
 		text := tidyLine(line.Text)
 		if text == "" {
