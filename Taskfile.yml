@@ -64,10 +64,19 @@ tasks:
         vars: {BUNDLE: '{{.APP_NAME}}.app', PLIST: build/darwin/Info.plist}
 
   build:windows:
-    desc: Cross-compile bin/arubox.exe for Windows (ARCH=amd64 or arm64)
+    desc: Build bin/arubox.exe for Windows, natively or cross-compiled (ARCH=amd64 or arm64)
     deps: [frontend]
     vars:
       ARCH: '{{.ARCH | default "amd64"}}'
+    cmds:
+      - task: exe
+        vars:
+          ARCH: '{{.ARCH}}'
+          OUT: '{{.APP_NAME}}.exe'
+          FLAGS: -tags production {{.PROD_FLAGS}} -ldflags="-w -s -H windowsgui {{.LDFLAGS_VERSION}}"
+
+  exe:
+    internal: true
     cmds:
       - defer: rm -f {{.APP_NAME}}_windows_{{.ARCH}}.syso
       - >-
@@ -76,7 +85,7 @@ tasks:
         -manifest build/windows/arubox.exe.manifest
         -info build/windows/info.json
         -out {{.APP_NAME}}_windows_{{.ARCH}}.syso
-      - go build -tags production {{.PROD_FLAGS}} -ldflags="-w -s -H windowsgui {{.LDFLAGS_VERSION}}" -o {{.BIN_DIR}}/{{.APP_NAME}}.exe .
+      - go build {{.FLAGS}} -o {{.BIN_DIR}}/{{.OUT}} .
     env:
       GOOS: windows
       GOARCH: '{{.ARCH}}'
@@ -96,13 +105,32 @@ tasks:
       - codesign --force --deep --sign - "{{.APP}}"
 
   run:
-    desc: Build a development bundle and run it (used by `task dev`)
+    desc: Build a development build for this system and run it (used by `task dev`)
     deps: [frontend]
+    cmds:
+      - task: run:darwin
+      - task: run:windows
+
+  run:darwin:
+    internal: true
+    platforms: [darwin]
     cmds:
       - go build -tags {{.MAC_TAGS}} {{.DEV_FLAGS}} -ldflags="{{.LDFLAGS_VERSION}}-dev" -o {{.BIN_DIR}}/{{.APP_NAME}} .
       - task: bundle
         vars: {BUNDLE: '{{.APP_NAME}}.dev.app', PLIST: build/darwin/Info.dev.plist}
       - '"{{.BIN_DIR}}/{{.APP_NAME}}.dev.app/Contents/MacOS/{{.APP_NAME}}"'
+
+  # Without -H windowsgui the app keeps its console, so logs show in the terminal.
+  run:windows:
+    internal: true
+    platforms: [windows]
+    cmds:
+      - task: exe
+        vars:
+          ARCH: '{{ARCH}}'
+          OUT: '{{.APP_NAME}}.dev.exe'
+          FLAGS: '{{.DEV_FLAGS}} -ldflags="{{.LDFLAGS_VERSION}}-dev"'
+      - '"{{.BIN_DIR}}/{{.APP_NAME}}.dev.exe"'
 
   dev:
     desc: Run with frontend hot reload; Go changes rebuild and restart the app
