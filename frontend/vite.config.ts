@@ -25,6 +25,7 @@ export default defineConfig({
         dashboard: fileURLToPath(new URL("./index.html", import.meta.url)),
         translator: fileURLToPath(new URL("./translator.html", import.meta.url)),
         capture: fileURLToPath(new URL("./capture.html", import.meta.url)),
+        launcher: fileURLToPath(new URL("./launcher.html", import.meta.url)),
       },
     },
   },

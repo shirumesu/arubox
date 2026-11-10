@@ -1,10 +1,11 @@
-import { Blocks, Keyboard, Languages, Settings2, type LucideIcon } from "lucide-react";
+import { Blocks, Keyboard, Languages, Rocket, Settings2, type LucideIcon } from "lucide-react";
 import { useState, type CSSProperties, type ReactNode } from "react";
 
 import appIcon from "../../build/icons/appicon.svg";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { useDashboard, type Mutate, type State } from "@/lib/dashboard";
+import { LauncherSettingsPage } from "@/modules/launcher/settings";
 import { TranslateSettingsPage } from "@/modules/translate/settings";
 import { GeneralPage } from "@/pages/general";
 import { HotkeysPage } from "@/pages/hotkeys";
@@ -27,6 +28,7 @@ const pages = [
 /** Settings pages of the modules, keyed by module id. */
 const modulePages: Page[] = [
   { id: "translate", title: "翻译", icon: Languages, Page: TranslateSettingsPage },
+  { id: "launcher", title: "启动器", icon: Rocket, Page: LauncherSettingsPage },
 ];
 
 /** Lets the area act as the window's title bar on macOS, where the system one is hidden. */

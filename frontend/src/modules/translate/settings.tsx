@@ -5,7 +5,7 @@ import { toast } from "sonner";
 
 import { DashboardService } from "@bindings/core";
 import { Service, type Settings, type SettingsState } from "@bindings/modules/translate";
-import { Row, Section } from "@/components/settings";
+import { KeepReadySelect, Row, Section } from "@/components/settings";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -14,14 +14,6 @@ import { Switch } from "@/components/ui/switch";
 import type { Mutate, State } from "@/lib/dashboard";
 import { errorMessage } from "@/lib/errors";
 import { languageName, languages } from "@/modules/translate/languages";
-
-const keepChoices = [
-  { minutes: 10, label: "10 分钟" },
-  { minutes: 30, label: "30 分钟" },
-  { minutes: 60, label: "1 小时" },
-  { minutes: 240, label: "4 小时" },
-  { minutes: 0, label: "永不释放" },
-];
 
 export function TranslateSettingsPage({ state, mutate }: { state: State; mutate: Mutate }) {
   const status = state.modules?.find((m) => m.id === "translate");
@@ -151,23 +143,12 @@ export function TranslateSettingsPage({ state, mutate }: { state: State; mutate:
           title="隐藏后保持就绪"
           description="浮窗隐藏后在后台保留这么久，期间随叫随到；之后释放内存，下次打开需要重新加载。"
         >
-          <Select
-            value={String(own.settings.keepMinutes)}
-            onValueChange={(v) => {
-              save({ keepMinutes: Number(v) });
+          <KeepReadySelect
+            minutes={own.settings.keepMinutes}
+            onChange={(keepMinutes) => {
+              save({ keepMinutes });
             }}
-          >
-            <SelectTrigger size="sm" className="w-32">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {keepChoices.map((c) => (
-                <SelectItem key={c.minutes} value={String(c.minutes)}>
-                  {c.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          />
         </Row>
       </Section>
     </>
