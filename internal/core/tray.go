@@ -5,6 +5,8 @@ import (
 	"runtime"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
+
+	"github.com/shirumesu/arubox/internal/update"
 )
 
 // trayTemplate is the macOS menu bar icon. It is a template image: macOS
@@ -18,7 +20,9 @@ var trayTemplate []byte
 //go:embed assets/tray.png
 var trayColour []byte
 
-func setupTray(c *Core) {
+// setupTray adds the tray icon and its menu. The returned function shows
+// a menu item for a new release while one is on offer.
+func setupTray(c *Core) func(update.State) {
 	tray := c.app.SystemTray.New()
 	tray.SetTooltip(appName)
 
@@ -29,6 +33,8 @@ func setupTray(c *Core) {
 	openDashboard := func() { go c.dashboard.open() }
 
 	menu := application.NewMenu()
+	updateItem := menu.Add("").SetHidden(true)
+	updateItem.OnClick(func(*application.Context) { go c.dashboard.openUpdate() })
 	menu.Add("打开仪表盘").OnClick(func(*application.Context) { openDashboard() })
 	menu.AddSeparator()
 	menu.Add("退出 " + appName).OnClick(func(*application.Context) { c.app.Quit() })
@@ -37,9 +43,33 @@ func setupTray(c *Core) {
 	if runtime.GOOS == "darwin" {
 		// A click opens the menu, as with every menu bar item.
 		tray.SetTemplateIcon(trayTemplate)
-		return
+	} else {
+		// On Windows a left click opens the dashboard and a right click the menu.
+		tray.SetIcon(trayColour)
+		tray.OnClick(openDashboard)
 	}
-	// On Windows a left click opens the dashboard and a right click the menu.
-	tray.SetIcon(trayColour)
-	tray.OnClick(openDashboard)
+
+	// The label shown, touched only on the UI thread; empty while hidden.
+	// Downloads report many times a second, mostly with no change here.
+	shown := ""
+	return func(s update.State) {
+		label := ""
+		switch s.Phase {
+		case update.PhaseAvailable, update.PhaseDownloading, update.PhaseInstalling:
+			label = "更新到 " + s.Release.Version + "…"
+		}
+		application.InvokeAsync(func() {
+			if label == shown {
+				return
+			}
+			shown = label
+			if label != "" {
+				updateItem.SetLabel(label)
+			}
+			updateItem.SetHidden(label == "")
+			// Windows builds the tray menu without hidden items, so it is
+			// built again.
+			tray.SetMenu(menu)
+		})
+	}
 }

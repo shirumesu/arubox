@@ -15,8 +15,12 @@ import (
 // hotkeyKeyEvent carries the keys pressed while a hotkey is recorded.
 const hotkeyKeyEvent = "hotkey:key"
 
+// showUpdateEvent asks an open dashboard to show the update dialog.
+const showUpdateEvent = "update:show"
+
 func init() {
 	application.RegisterEvent[platform.KeyPress](hotkeyKeyEvent)
+	application.RegisterEvent[application.Void](showUpdateEvent)
 }
 
 // dashboard is opened rarely, so its window is destroyed on close and
@@ -59,7 +63,23 @@ func (d *dashboard) endRecording() {
 	d.core.hotkeys.Resume()
 }
 
-func (d *dashboard) open() {
+func (d *dashboard) open() { d.openAt("/") }
+
+// openUpdate opens the dashboard on the update dialog. A dashboard being
+// created shows it from its address, an open one when told to.
+func (d *dashboard) openUpdate() {
+	d.mu.Lock()
+	open := d.win != nil
+	d.mu.Unlock()
+	if !open {
+		d.openAt("/#update")
+		return
+	}
+	d.core.app.Event.Emit(showUpdateEvent)
+	d.open()
+}
+
+func (d *dashboard) openAt(url string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.win != nil {
@@ -78,7 +98,7 @@ func (d *dashboard) open() {
 		Height:           640,
 		MinWidth:         760,
 		MinHeight:        520,
-		URL:              "/",
+		URL:              url,
 		BackgroundColour: background,
 		Mac: application.MacWindow{
 			TitleBar:                application.MacTitleBarHiddenInset,
@@ -107,7 +127,6 @@ type DashboardService struct {
 type State struct {
 	// Platform is the GOOS value: "darwin" or "windows".
 	Platform  string          `json:"platform"`
-	Version   string          `json:"version"`
 	Autostart Autostart       `json:"autostart"`
 	Modules   []module.Status `json:"modules"`
 	Hotkeys   []hotkey.Status `json:"hotkeys"`
@@ -130,7 +149,6 @@ func (s *DashboardService) State() State {
 	}
 	return State{
 		Platform:  runtime.GOOS,
-		Version:   Version,
 		Autostart: auto,
 		Modules:   c.modules.List(),
 		Hotkeys:   c.hotkeys.List(),

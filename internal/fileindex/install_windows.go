@@ -80,7 +80,15 @@ func install(sid string) error {
 			return err
 		}
 	}
-	if err := copyExecutable(target); err != nil {
+	// A stopped service's process lets go of its executable a moment after
+	// it reports stopped, and updating the program replaces it every time.
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(100 * time.Millisecond) {
+		err = copyExecutable(target)
+		if err == nil || !exists || time.Now().After(deadline) {
+			break
+		}
+	}
+	if err != nil {
 		return err
 	}
 	config := mgr.Config{
@@ -274,6 +282,11 @@ func runElevated(args string) error {
 	if err != nil {
 		return err
 	}
+	return runElevatedFile(exe, args)
+}
+
+// runElevatedFile runs exe with args as administrator and waits for it.
+func runElevatedFile(exe, args string) error {
 	verb, _ := windows.UTF16PtrFromString("runas")
 	file, err := windows.UTF16PtrFromString(exe)
 	if err != nil {

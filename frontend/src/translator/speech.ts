@@ -1,4 +1,7 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+
+import { Service } from "@bindings/modules/translate";
+import { errorMessage } from "@/lib/errors";
 
 /** Picks a system voice for a language code such as "en" or "zh-CN". */
 function voiceFor(lang: string): SpeechSynthesisVoice | undefined {
@@ -13,46 +16,103 @@ function voiceFor(lang: string): SpeechSynthesisVoice | undefined {
 }
 
 /**
- * Reads text aloud with the system's voices. Each text has a key, so the
- * button that started it can show it is speaking and stop it again.
+ * Reads text aloud, with the system's voices or the online voices of Edge.
+ * Each text has a key, so the button that started it can show it is
+ * speaking and stop it again. A reading that fails leaves its message in
+ * `error` until the next one starts.
  */
 export function useSpeech() {
   const [speaking, setSpeaking] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  // The Edge voice is fetched first, then played. Only the latest may play.
+  const pending = useRef<{ cancel: () => unknown } | null>(null);
+  const audio = useRef<HTMLAudioElement | null>(null);
 
   // The voice list loads asynchronously; asking for it starts the load.
   useEffect(() => {
     speechSynthesis.getVoices();
-    return () => {
-      speechSynthesis.cancel();
-    };
   }, []);
+
+  const halt = useCallback(() => {
+    speechSynthesis.cancel();
+    pending.current?.cancel();
+    pending.current = null;
+    audio.current?.pause();
+    audio.current = null;
+  }, []);
+
+  useEffect(() => halt, [halt]);
 
   const stop = useCallback(() => {
-    speechSynthesis.cancel();
+    halt();
     setSpeaking(null);
-  }, []);
+  }, [halt]);
 
   const toggle = useCallback(
-    (key: string, text: string, lang: string) => {
-      speechSynthesis.cancel();
+    (key: string, text: string, lang: string, voice: string) => {
+      halt();
+      setError(null);
       if (speaking === key) {
         setSpeaking(null);
         return;
       }
-      const utterance = new SpeechSynthesisUtterance(text);
-      utterance.lang = lang;
-      const voice = voiceFor(lang);
-      if (voice) utterance.voice = voice;
       const done = () => {
         setSpeaking((current) => (current === key ? null : current));
       };
+      setSpeaking(key);
+
+      if (voice === "edge") {
+        const call = Service.Speak(text, lang);
+        pending.current = call;
+        const fail = (message: string) => {
+          setError(message);
+          done();
+        };
+        call.then(
+          (mp3) => {
+            if (pending.current !== call) return;
+            pending.current = null;
+            if (mp3 === null) {
+              fail("没有收到 Edge 在线朗读的声音");
+              return;
+            }
+            const player = new Audio(`data:audio/mpeg;base64,${mp3}`);
+            audio.current = player;
+            player.onended = () => {
+              audio.current = null;
+              done();
+            };
+            player.onerror = () => {
+              if (audio.current !== player) return;
+              audio.current = null;
+              fail("无法播放 Edge 在线朗读的声音");
+            };
+            player.play().catch(() => {
+              // Stopping before the sound starts rejects it too.
+              if (audio.current !== player) return;
+              audio.current = null;
+              fail("无法播放 Edge 在线朗读的声音");
+            });
+          },
+          (err: unknown) => {
+            if (pending.current !== call) return;
+            pending.current = null;
+            fail(errorMessage(err));
+          },
+        );
+        return;
+      }
+
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.lang = lang;
+      const systemVoice = voiceFor(lang);
+      if (systemVoice) utterance.voice = systemVoice;
       utterance.onend = done;
       utterance.onerror = done;
-      setSpeaking(key);
       speechSynthesis.speak(utterance);
     },
-    [speaking],
+    [speaking, halt],
   );
 
-  return { speaking, toggle, stop };
+  return { speaking, error, toggle, stop };
 }

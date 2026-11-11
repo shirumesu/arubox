@@ -251,11 +251,11 @@ export function Translator() {
             />
           )}
           <span className="flex-1" />
-          {translation && (
+          {translation && settings && (
             <SpeakButton
               speaking={speech.speaking === "source"}
               onClick={() => {
-                speech.toggle("source", text, translation.source);
+                speech.toggle("source", text, translation.source, settings.voice);
               }}
             />
           )}
@@ -290,19 +290,16 @@ export function Translator() {
           {result.kind === "loading" && (
             <LoaderCircle className="size-3.5 animate-spin text-muted-foreground" />
           )}
-          {settings &&
-            (settings.deeplKey === "" ? (
-              <span className="px-1.5 text-xs text-muted-foreground">Google 翻译</span>
-            ) : (
-              <Picker
-                label="翻译服务"
-                value={settings.engine}
-                options={engines}
-                onChange={(engine) => {
-                  changeSettings({ engine });
-                }}
-              />
-            ))}
+          {settings && (
+            <Picker
+              label="翻译服务"
+              value={settings.engine}
+              options={engines.filter((e) => e.value !== "deepl" || settings.deeplKey !== "")}
+              onChange={(engine) => {
+                changeSettings({ engine });
+              }}
+            />
+          )}
         </div>
         {result.kind === "error" && (
           <p className="px-3 pb-3 text-[13px] text-destructive">{result.message}</p>
@@ -316,17 +313,20 @@ export function Translator() {
               {translation.text}
             </p>
             <div className="flex h-8 items-center justify-end gap-0.5 px-1.5">
-              <SpeakButton
-                speaking={speech.speaking === "result"}
-                onClick={() => {
-                  speech.toggle("result", translation.text, translation.target);
-                }}
-              />
+              {settings && (
+                <SpeakButton
+                  speaking={speech.speaking === "result"}
+                  onClick={() => {
+                    speech.toggle("result", translation.text, translation.target, settings.voice);
+                  }}
+                />
+              )}
               <CopyButton text={translation.text} />
             </div>
           </>
         )}
       </section>
+      {speech.error && <p className="mx-3 mt-2 text-[13px] text-destructive">{speech.error}</p>}
       <div className="h-2.5 shrink-0" />
     </div>
   );
@@ -336,6 +336,7 @@ const noDrag = { "--wails-draggable": "no-drag" } as CSSProperties;
 
 const engines = [
   { value: "google", label: "Google 翻译" },
+  { value: "edge", label: "Edge 翻译" },
   { value: "deepl", label: "DeepL" },
 ];
 

@@ -1,9 +1,11 @@
 .task
 .wails
 bin
+/dist
 *.syso
 frontend/dist
 frontend/node_modules
 frontend/bindings
 .DS_Store
 *.tsbuildinfo
+.claude/worktrees/

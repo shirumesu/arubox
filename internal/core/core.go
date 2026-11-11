@@ -22,6 +22,8 @@ import (
 	"github.com/shirumesu/arubox/internal/modules/launcher"
 	"github.com/shirumesu/arubox/internal/modules/screenshot"
 	"github.com/shirumesu/arubox/internal/modules/translate"
+	"github.com/shirumesu/arubox/internal/ocr"
+	"github.com/shirumesu/arubox/internal/update"
 )
 
 // Version is set at build time.
@@ -47,6 +49,7 @@ type Core struct {
 	hotkeys   *hotkey.Manager
 	modules   *module.Registry
 	dashboard *dashboard
+	updater   *update.Updater
 }
 
 // Run starts the program and blocks until it quits. assets is the built
@@ -78,15 +81,28 @@ func Run(assets fs.FS, css []byte) error {
 		return err
 	}
 
-	c := &Core{log: log, logDir: logDir}
-	translator := translate.New(store, log)
+	dataDir, err := dataDirectory()
+	if err != nil {
+		return err
+	}
+	updater, err := update.New(store, log, Version)
+	if err != nil {
+		return err
+	}
+	c := &Core{log: log, logDir: logDir, updater: updater}
+	reader := ocr.New(store, log, filepath.Join(dataDir, "ocr"))
+	translator := translate.New(store, log, reader)
 	modules := []module.Module{
 		translator,
 		launcher.New(store, log, launcherTranslator{translator}),
-		screenshot.New(store, log, screenshotTranslator{translator}),
+		screenshot.New(store, log, reader, screenshotTranslator{translator}),
 		desktop.New(store, log, tokens),
 	}
-	services := []application.Service{application.NewService(&DashboardService{core: c})}
+	services := []application.Service{
+		application.NewService(&DashboardService{core: c}),
+		updater.Service(),
+		application.NewService(ocr.NewService(reader)),
+	}
 	for _, m := range modules {
 		services = append(services, m.Services()...)
 	}
@@ -122,10 +138,11 @@ func Run(assets fs.FS, css []byte) error {
 	})
 	c.modules = module.NewRegistry(module.Context{App: c.app, Log: log}, store, c.hotkeys, modules)
 
-	setupTray(c)
+	showUpdate := setupTray(c)
 	c.app.Event.OnApplicationEvent(events.Common.ApplicationStarted, func(*application.ApplicationEvent) {
 		c.hotkeys.Activate(coreOwner)
 		c.modules.Start()
+		c.updater.Start(c.app, showUpdate)
 	})
 
 	if err := c.app.Run(); err != nil {
@@ -137,6 +154,7 @@ func Run(assets fs.FS, css []byte) error {
 }
 
 func (c *Core) shutdown() {
+	c.updater.Stop()
 	c.modules.Stop()
 	c.hotkeys.UnregisterAll()
 }

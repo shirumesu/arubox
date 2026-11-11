@@ -8,8 +8,9 @@ import (
 
 // Paragraphs joins lines read off the screen into the text to translate.
 // Lines close below each other belong to one paragraph and are joined, so a
-// sentence broken across lines is translated as one; a wider gap, or a line
-// that does not follow below, starts a new paragraph.
+// sentence broken across lines is translated as one; a wider gap, a line
+// that does not follow below, or one in another column, such as a button
+// beside a label, starts a new paragraph.
 func Paragraphs(lines []TextLine) string {
 	var b strings.Builder
 	var prev Box
@@ -23,7 +24,8 @@ func Paragraphs(lines []TextLine) string {
 			height := max(prev.Height, box.Height)
 			gap := box.Y - (prev.Y + prev.Height)
 			switch {
-			case box.Y < prev.Y+prev.Height/2 || gap > 0.75*height:
+			case box.Y < prev.Y+prev.Height/2 || gap > 0.75*height ||
+				box.X >= prev.X+prev.Width || box.X+box.Width <= prev.X:
 				b.WriteString("\n")
 			default:
 				joined := b.String()

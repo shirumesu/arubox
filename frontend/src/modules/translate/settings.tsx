@@ -82,7 +82,10 @@ export function TranslateSettingsPage({ state, mutate }: { state: State; mutate:
       </Section>
 
       <Section title="翻译服务">
-        <Row title="翻译服务" description="浮窗里也可以随时切换。填写 DeepL 密钥后才能选 DeepL。">
+        <Row
+          title="翻译服务"
+          description="Google 翻译和 Edge 翻译无需密钥，是非官方接口，可能被限流或失效。浮窗里也可以随时切换。填写 DeepL 密钥后才能选 DeepL。"
+        >
           <Select
             value={own.settings.engine}
             onValueChange={(engine) => {
@@ -94,6 +97,7 @@ export function TranslateSettingsPage({ state, mutate }: { state: State; mutate:
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="google">Google 翻译</SelectItem>
+              <SelectItem value="edge">Edge 翻译</SelectItem>
               <SelectItem value="deepl" disabled={own.settings.deeplKey === ""}>
                 DeepL
               </SelectItem>
@@ -121,6 +125,28 @@ export function TranslateSettingsPage({ state, mutate }: { state: State; mutate:
             <ExternalLink />
             获取
           </Button>
+        </Row>
+      </Section>
+
+      <Section title="朗读">
+        <Row
+          title="朗读声音"
+          description="系统声音在本机合成，离线可用。Edge 在线朗读的声音更自然，需要联网，是非官方接口，可能被限制或失效，失败时会提示，不会改用系统声音。"
+        >
+          <Select
+            value={own.settings.voice}
+            onValueChange={(voice) => {
+              save({ voice });
+            }}
+          >
+            <SelectTrigger size="sm" className="w-36">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="system">系统声音</SelectItem>
+              <SelectItem value="edge">Edge 在线朗读</SelectItem>
+            </SelectContent>
+          </Select>
         </Row>
       </Section>
 

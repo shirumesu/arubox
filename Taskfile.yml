@@ -2,7 +2,18 @@ version: '3'
 
 vars:
   APP_NAME: arubox
+  # The one place the version is written. The bundle's Info.plist, the
+  # executable's version resource and the build itself take it from here;
+  # release CI checks the tag and CHANGELOG.md against it.
   VERSION: 0.1.0
+  # Windows and the bundle's build number want plain numbers, so a
+  # prerelease uses those of the release it leads to.
+  NUMERIC_VERSION: '{{index (splitList "-" .VERSION) 0}}'
+  # The identity app bundles are signed with, and the keychain that holds
+  # it when that is not on the search list. Without an identity they are
+  # signed ad hoc; scripts/package.sh says why releases need a certificate.
+  SIGN_IDENTITY: '{{.ARUBOX_SIGN_IDENTITY | default "-"}}'
+  SIGN_KEYCHAIN: '{{.ARUBOX_SIGN_KEYCHAIN}}'
   BIN_DIR: bin
   VITE_PORT: '{{.WAILS_VITE_PORT | default 9245}}'
   LDFLAGS_VERSION: -X github.com/shirumesu/arubox/internal/core.Version={{.VERSION}}
@@ -19,6 +30,11 @@ tasks:
   default:
     cmds:
       - task --list
+
+  version:
+    desc: Print the version
+    cmds:
+      - echo {{.VERSION}}
 
   install:
     desc: Install frontend dependencies
@@ -74,13 +90,21 @@ tasks:
 
   exe:
     internal: true
+    vars:
+      INFO: '{{.BIN_DIR}}/info-{{.ARCH}}.json'
     cmds:
-      - defer: rm -f {{.APP_NAME}}_windows_{{.ARCH}}.syso
+      - defer: rm -f {{.APP_NAME}}_windows_{{.ARCH}}.syso {{.INFO}}
+      - mkdir -p {{.BIN_DIR}}
+      # The version resource shown in the file's properties.
+      - >-
+        printf '{"fixed":{"file_version":"%s","product_version":"%s"},"info":{"0409":{"FileVersion":"%s","ProductVersion":"%s","FileDescription":"%s","ProductName":"%s"}}}'
+        {{.NUMERIC_VERSION}} {{.NUMERIC_VERSION}} {{.VERSION}} {{.VERSION}} {{.APP_NAME}} {{.APP_NAME}}
+        > {{.INFO}}
       - >-
         wails generate syso -arch {{.ARCH}}
         -icon build/windows/icon.ico
         -manifest build/windows/arubox.exe.manifest
-        -info build/windows/info.json
+        -info {{.INFO}}
         -out {{.APP_NAME}}_windows_{{.ARCH}}.syso
       - go build {{.FLAGS}} -o {{.BIN_DIR}}/{{.OUT}} .
     env:
@@ -98,8 +122,10 @@ tasks:
       - cp {{.BIN_DIR}}/{{.APP_NAME}} "{{.APP}}/Contents/MacOS/{{.APP_NAME}}"
       - cp build/darwin/icons.icns "{{.APP}}/Contents/Resources/"
       - cp {{.PLIST}} "{{.APP}}/Contents/Info.plist"
+      - plutil -insert CFBundleShortVersionString -string {{.VERSION}} "{{.APP}}/Contents/Info.plist"
+      - plutil -insert CFBundleVersion -string {{.NUMERIC_VERSION}} "{{.APP}}/Contents/Info.plist"
       - xattr -cr "{{.APP}}"
-      - codesign --force --deep --sign - "{{.APP}}"
+      - codesign --force --sign "{{.SIGN_IDENTITY}}" {{if .SIGN_KEYCHAIN}}--keychain "{{.SIGN_KEYCHAIN}}"{{end}} --timestamp=none "{{.APP}}"
 
   run:
     desc: Build a development build for this system and run it (used by `task dev`)

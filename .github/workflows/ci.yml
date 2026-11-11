@@ -1,0 +1,50 @@
+name: CI
+
+# Lints Go for macOS and Windows, runs the Go tests and lints the frontend
+# on every push and pull request: what `task lint` and `task test` do.
+# Packaging runs only in release.yml.
+#
+# A Mac runs it all: the macOS code needs cgo, and the Windows code has
+# none, so it is checked there too. The Go code embeds the built
+# frontend, so that is built first.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.11.2
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      # The Taskfile calls the Wails CLI wails, as Homebrew installs it.
+      - name: Install Task, the Wails CLI and golangci-lint
+        run: |
+          go install github.com/go-task/task/v3/cmd/task@v3.54.0
+          go install github.com/wailsapp/wails/v3/cmd/wails3@v3.1.0
+          ln -s "$(go env GOPATH)/bin/wails3" "$(go env GOPATH)/bin/wails"
+          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0
+      - name: Build the frontend
+        run: task frontend
+      - name: Lint
+        run: task lint
+      - name: Test
+        run: task test

@@ -27,12 +27,20 @@ type Store interface {
 	SetModuleSettings(id string, v any) error
 }
 
+// TextReader reads the text in a picture with the OCR engine the user
+// chose. The core provides it.
+type TextReader interface {
+	ImageText(img platform.Image) ([]platform.TextLine, error)
+}
+
 // Module is the translation module.
 type Module struct {
 	store  Store
+	reader TextReader
 	log    *slog.Logger
 	client *http.Client
 	google *google
+	edge   *edgeTranslator
 
 	mu       sync.Mutex
 	settings Settings
@@ -41,7 +49,7 @@ type Module struct {
 }
 
 // New creates the module. It does nothing until enabled.
-func New(store Store, log *slog.Logger) *Module {
+func New(store Store, log *slog.Logger, reader TextReader) *Module {
 	settings := defaultSettings()
 	if err := store.ModuleSettings(id, &settings); err != nil {
 		log.Warn("translate settings unreadable, using defaults", "error", err)
@@ -53,10 +61,12 @@ func New(store Store, log *slog.Logger) *Module {
 	}
 	return &Module{
 		store:    store,
+		reader:   reader,
 		log:      log,
 		settings: settings,
 		client:   client,
 		google:   &google{client: client},
+		edge:     &edgeTranslator{client: client},
 	}
 }
 
@@ -218,7 +228,7 @@ func (m *Module) readScreen(seq int, area application.Rect) {
 	if !ok {
 		return
 	}
-	lines, err := platform.ImageText(img)
+	lines, err := m.reader.ImageText(img)
 	text := platform.Paragraphs(lines)
 	switch {
 	case err != nil:
@@ -261,11 +271,18 @@ func (m *Module) TranslateText(ctx context.Context, text string) (Translation, s
 		return Translation{}, "", ErrDisabled
 	}
 	t, err := m.translate(ctx, strings.TrimSpace(text))
-	engine := "Google 翻译"
-	if m.currentSettings().Engine == engineDeepL {
-		engine = "DeepL"
+	return t, engineName(m.currentSettings().Engine), err
+}
+
+// engineName is the name an engine is shown under.
+func engineName(engine string) string {
+	switch engine {
+	case engineDeepL:
+		return "DeepL"
+	case engineEdge:
+		return "Edge 翻译"
 	}
-	return t, engine, err
+	return "Google 翻译"
 }
 
 // Available reports whether the module is on, for other modules.
@@ -291,8 +308,11 @@ type engine interface {
 func (m *Module) translate(ctx context.Context, text string) (Translation, error) {
 	s := m.currentSettings()
 	var e engine = m.google
-	if s.Engine == engineDeepL {
+	switch s.Engine {
+	case engineDeepL:
 		e = &deepl{client: m.client, key: s.DeepLKey}
+	case engineEdge:
+		e = m.edge
 	}
 	t, err := e.translate(ctx, text, s.Source, s.Target)
 	if err != nil || s.Source != autoDetect || !sameLanguage(t.Source, s.Target) || sameLanguage(s.Second, s.Target) {

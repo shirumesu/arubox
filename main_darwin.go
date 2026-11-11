@@ -1,5 +1,11 @@
 package main
 
-// runHelper reports whether the executable was started for something other
-// than the program; on macOS it never is.
-func runHelper() bool { return false }
+import (
+	"os"
+
+	"github.com/shirumesu/arubox/internal/ocr"
+)
+
+// runHelper runs the command line the executable has besides the program:
+// the OCR worker. It reports whether it ran it.
+func runHelper() bool { return ocr.RunWorker(os.Args) }

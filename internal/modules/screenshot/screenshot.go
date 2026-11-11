@@ -40,6 +40,12 @@ type Translator interface {
 	Open(text string)
 }
 
+// TextReader reads the text in a picture with the OCR engine the user
+// chose. The core provides it.
+type TextReader interface {
+	ImageText(img platform.Image) ([]platform.TextLine, error)
+}
+
 // Settings is what the user can change about the module.
 type Settings struct {
 	// KeepMinutes is how long the hidden editor is kept ready before its
@@ -64,6 +70,7 @@ const jpegQuality = 92
 // Module is the screenshot module.
 type Module struct {
 	store      Store
+	reader     TextReader
 	log        *slog.Logger
 	translator Translator
 	pins       *pins
@@ -80,13 +87,13 @@ type Module struct {
 
 // New creates the module. It does nothing until enabled. translator may be
 // nil, which leaves translation out.
-func New(store Store, log *slog.Logger, translator Translator) *Module {
+func New(store Store, log *slog.Logger, reader TextReader, translator Translator) *Module {
 	s := defaultStored()
 	if err := store.ModuleSettings(id, &s); err != nil {
 		log.Warn("screenshot settings unreadable, using defaults", "error", err)
 		s = defaultStored()
 	}
-	return &Module{store: store, log: log, translator: translator, stored: s, pins: &pins{}}
+	return &Module{store: store, reader: reader, log: log, translator: translator, stored: s, pins: &pins{}}
 }
 
 // Info describes the module.
@@ -255,7 +262,7 @@ func (m *Module) recognize(seq int, r application.Rect) ([]platform.TextLine, er
 	if !current || img.Width == 0 {
 		return nil, errors.New("截图已失效")
 	}
-	lines, err := platform.ImageText(img.Crop(r.X, r.Y, r.Width, r.Height))
+	lines, err := m.reader.ImageText(img.Crop(r.X, r.Y, r.Width, r.Height))
 	if err == nil && len(lines) == 0 {
 		err = errors.New("没有识别到文字")
 	}

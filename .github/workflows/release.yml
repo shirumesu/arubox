@@ -1,0 +1,120 @@
+name: Release
+
+# A pushed v* tag builds the release files and opens a GitHub release whose
+# notes are CHANGELOG.md. A prerelease (alpha, beta) is published at once;
+# a stable release stays a draft until someone publishes it, which makes it
+# visible to the in-app updater. A manual run builds the same files as a
+# workflow artifact without releasing.
+#
+# One Mac builds everything: the Windows program has no cgo, so it
+# cross-compiles, and the macOS bundle needs codesign. The bundle is signed
+# with the arubox certificate from a keychain made for the run, and the
+# manifest with the update signing key; see scripts/package.sh.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.11.2
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      # The Taskfile calls the Wails CLI wails, as Homebrew installs it.
+      - name: Install Task and the Wails CLI
+        run: |
+          go install github.com/go-task/task/v3/cmd/task@v3.54.0
+          go install github.com/wailsapp/wails/v3/cmd/wails3@v3.1.0
+          ln -s "$(go env GOPATH)/bin/wails3" "$(go env GOPATH)/bin/wails"
+      - name: Check tag and version
+        if: github.ref_type == 'tag'
+        run: |
+          version=$(task --silent version)
+          if [[ "v$version" != "$GITHUB_REF_NAME" ]]; then
+            echo "Tag $GITHUB_REF_NAME does not match version $version in Taskfile.yml." >&2
+            exit 1
+          fi
+      - name: Package
+        env:
+          ARUBOX_CODESIGN_P12: ${{ secrets.ARUBOX_CODESIGN_P12 }}
+          ARUBOX_CODESIGN_PASSWORD: ${{ secrets.ARUBOX_CODESIGN_PASSWORD }}
+          ARUBOX_UPDATE_SIGNING_KEY: ${{ secrets.ARUBOX_UPDATE_SIGNING_KEY }}
+        run: |
+          for secret in ARUBOX_CODESIGN_P12 ARUBOX_CODESIGN_PASSWORD ARUBOX_UPDATE_SIGNING_KEY; do
+            if [[ -z "${!secret//[[:space:]]/}" ]]; then
+              echo "Set the $secret repository secret." >&2
+              exit 1
+            fi
+          done
+          keychain="$RUNNER_TEMP/arubox-signing.keychain-db"
+          certificate="$RUNNER_TEMP/arubox-codesign.p12"
+          key="$RUNNER_TEMP/arubox-update-signing.pem"
+          password=$(openssl rand -hex 24)
+          security create-keychain -p "$password" "$keychain"
+          trap 'security delete-keychain "$keychain"; rm -f "$certificate" "$key"' EXIT
+          printf '%s' "$ARUBOX_CODESIGN_P12" | base64 --decode > "$certificate"
+          printf '%s' "$ARUBOX_UPDATE_SIGNING_KEY" > "$key"
+          security set-keychain-settings -lut 3600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          security import "$certificate" -k "$keychain" -P "$ARUBOX_CODESIGN_PASSWORD" -T /usr/bin/codesign
+          # Lets codesign use the key without asking.
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain" > /dev/null
+          ARUBOX_SIGN_IDENTITY='arubox Code Signing' ARUBOX_SIGN_KEYCHAIN="$keychain" \
+            scripts/package.sh -k "$key"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: arubox-${{ github.ref_name }}
+          path: dist/*
+          compression-level: 0
+          if-no-files-found: error
+      # The notes end in a table of direct download links to this release's
+      # files.
+      - name: Create release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          base="https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME"
+          {
+            tail -n +2 CHANGELOG.md
+            printf '\n## 下载\n\n| 系统 | 架构 | 文件 |\n| --- | --- | --- |\n'
+            while IFS='|' read -r system arch file; do
+              if [[ ! -f "dist/$file" ]]; then
+                echo "The download table names dist/$file, which was not built." >&2
+                exit 1
+              fi
+              echo "| $system | $arch | [$file]($base/$file) |"
+            done <<EOF
+          macOS 14 及以上|Apple 芯片|arubox-$version-macos-arm64.dmg
+          Windows 10 / 11|x64|arubox-$version-windows-x64.exe
+          Windows 10 / 11|Arm|arubox-$version-windows-arm64.exe
+          EOF
+          } > "$RUNNER_TEMP/notes.md"
+          options=(--notes-file "$RUNNER_TEMP/notes.md" --title "arubox $version")
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            # Until a stable version exists, an alpha or beta is the latest
+            # release, so the repository page and releases/latest show it.
+            # The app picks updates by version and its channel, not by this
+            # flag.
+            stable=$(gh release list --repo "$GITHUB_REPOSITORY" --exclude-drafts --limit 1000 \
+              --json tagName --jq '[.[].tagName | select(contains("-") | not)] | length')
+            if [[ $stable -gt 0 ]]; then options+=(--prerelease); fi
+          else
+            options+=(--draft)
+          fi
+          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" "${options[@]}"

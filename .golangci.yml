@@ -38,8 +38,8 @@ linters:
       - std-error-handling
     rules:
       # System calls need unsafe pointers and fixed-width conversions; they
-      # are confined to the platform layer.
-      - path: internal/(platform|fileindex)/
+      # are confined to the platform layer and the ONNX Runtime binding.
+      - path: internal/(platform|fileindex|ort)/
         linters: [gosec]
         text: "G103|G115"
 

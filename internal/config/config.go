@@ -22,6 +22,8 @@ type Config struct {
 	Hotkeys map[string]string `json:"hotkeys,omitempty"`
 	// Modules holds per-module state keyed by module id.
 	Modules map[string]Module `json:"modules,omitempty"`
+	// UpdatePrereleases is whether updates include alpha and beta versions.
+	UpdatePrereleases bool `json:"updatePrereleases,omitempty"`
 }
 
 // Module is the persisted state of one module.
@@ -139,14 +141,31 @@ func (s *Store) SetModuleSettings(id string, v any) error {
 	})
 }
 
+// UpdatePrereleases reports whether updates include alpha and beta
+// versions.
+func (s *Store) UpdatePrereleases() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.data.UpdatePrereleases
+}
+
+// SetUpdatePrereleases records whether updates include alpha and beta
+// versions.
+func (s *Store) SetUpdatePrereleases(on bool) error {
+	return s.update(func(c *Config) {
+		c.UpdatePrereleases = on
+	})
+}
+
 // update applies fn to a copy of the settings, writes the copy to disk and
 // only then makes it current, so a failed write leaves memory and disk equal.
 func (s *Store) update(fn func(c *Config)) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	next := Config{
-		Hotkeys: maps.Clone(s.data.Hotkeys),
-		Modules: maps.Clone(s.data.Modules),
+		Hotkeys:           maps.Clone(s.data.Hotkeys),
+		Modules:           maps.Clone(s.data.Modules),
+		UpdatePrereleases: s.data.UpdatePrereleases,
 	}
 	fn(&next)
 	if err := writeFile(s.path, next); err != nil {

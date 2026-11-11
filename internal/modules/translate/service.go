@@ -60,6 +60,12 @@ func (s *Service) Translate(ctx context.Context, text string) (Translation, erro
 	return s.module.translate(ctx, strings.TrimSpace(text))
 }
 
+// Speak reads text aloud with the Edge online voice for a language and
+// returns it as MP3. Stopping the reading cancels it through ctx.
+func (s *Service) Speak(ctx context.Context, text, lang string) ([]byte, error) {
+	return s.module.speak(ctx, text, lang)
+}
+
 // Attach is called by the popup page once it listens for requests. It
 // returns the request that arrived while the page was loading, or nil.
 func (s *Service) Attach() *Request {
