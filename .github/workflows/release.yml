@@ -70,6 +70,16 @@ jobs:
           printf '%s' "$ARUBOX_UPDATE_SIGNING_KEY" > "$key"
           security set-keychain-settings -lut 3600 "$keychain"
           security unlock-keychain -p "$password" "$keychain"
+          # On the runner's macOS, codesign finds an identity only in a
+          # keychain on the search list, even when told which keychain to
+          # use. Deleting the keychain takes it off the list again.
+          searched=()
+          while IFS= read -r line; do
+            line=${line#"${line%%[![:space:]]*}"}
+            line=${line#\"}
+            searched+=("${line%\"}")
+          done < <(security list-keychains -d user)
+          security list-keychains -d user -s "$keychain" "${searched[@]}"
           security import "$certificate" -k "$keychain" -P "$ARUBOX_CODESIGN_PASSWORD" -T /usr/bin/codesign
           # Lets codesign use the key without asking.
           security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain" > /dev/null
