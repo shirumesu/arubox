@@ -1,3 +1,5 @@
+//go:build windows
+
 // Package fileindex finds files by name the way Everything does: a service
 // with administrator rights reads each NTFS volume's file table and follows
 // its change journal, and the program keeps the names in memory and

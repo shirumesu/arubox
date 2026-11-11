@@ -14,7 +14,8 @@ import (
 // program ends without giving the desktop back (a crash, or being ended
 // from Task Manager), a guard puts them back: a copy of the program that
 // File Explorer starts, so it is no part of the program's process tree, and
-// that waits for the program to end.
+// that waits for the program to end. A program that ended before the guard
+// could open it is put back the same way.
 
 // flagDesktopGuard is the command line of the guard: the flag and the
 // program's process ID.
@@ -83,15 +84,25 @@ func RunDesktopGuard(args []string) bool {
 	return true
 }
 
+// guardDesktop waits for the program to end and then gives the desktop
+// back, unless the program did so itself.
 func guardDesktop(pid int) {
 	process, err := windows.OpenProcess(windows.SYNCHRONIZE, false, uint32(pid))
 	if err != nil {
+		// The program is gone already: it ended before the guard got going.
+		restoreDesktop(pid)
 		return
 	}
 	defer func() { _ = windows.CloseHandle(process) }()
 	name, _ := windows.UTF16PtrFromString(guardEventName(pid))
 	event, err := windows.OpenEvent(windows.SYNCHRONIZE, false, name)
 	if err != nil {
+		// The event lives as long as the program holds it, so it is missing
+		// when the program ended, or when it closed the event itself after
+		// giving the desktop back.
+		if r, err := windows.WaitForSingleObject(process, 0); err == nil && r == windows.WAIT_OBJECT_0 {
+			restoreDesktop(pid)
+		}
 		return
 	}
 	defer func() { _ = windows.CloseHandle(event) }()
@@ -101,6 +112,13 @@ func guardDesktop(pid int) {
 	if err != nil || r != windows.WAIT_OBJECT_0+1 {
 		return
 	}
+	restoreDesktop(pid)
+}
+
+// restoreDesktop shows File Explorer's icons and puts them where the
+// program saved them, then removes the saved positions. After a normal
+// detach there is nothing left to do.
+func restoreDesktop(pid int) {
 	runtime.LockOSThread()
 	if hr, _, _ := procOleInitialize.Call(0); !succeeded(hr) {
 		return
