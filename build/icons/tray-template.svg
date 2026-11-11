@@ -1,6 +1,19 @@
+<!-- macOS menu bar template: only the alpha channel matters. The cat's head, with the eyes punched out. -->
 <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 22 22">
-  <rect x="2.5" y="3.5" width="17" height="4.5" rx="1.6" fill="#000"/>
-  <rect x="4.3" y="9.3" width="13.4" height="9.4" rx="2" fill="none" stroke="#000" stroke-width="1.6"/>
-  <circle cx="9" cy="13" r="1.15" fill="#000"/>
-  <circle cx="13" cy="13" r="1.15" fill="#000"/>
+  <defs>
+    <mask id="eyes" maskUnits="userSpaceOnUse" x="0" y="0" width="22" height="22">
+      <rect width="22" height="22" fill="#FFF"/>
+      <ellipse cx="7.8" cy="12.6" rx="1.45" ry="1.9" fill="#000"/>
+      <ellipse cx="14.2" cy="12.6" rx="1.45" ry="1.9" fill="#000"/>
+    </mask>
+  </defs>
+  <g mask="url(#eyes)">
+    <g transform="translate(11 12.4) scale(0.0265)">
+      <g fill="#000" stroke="#000" stroke-width="48" stroke-linejoin="round">
+        <path d="M-285 -70Q-310 -262 -250 -288Q-194 -278 -88 -200Z"/>
+        <path d="M285 -70Q310 -262 250 -288Q194 -278 88 -200Z"/>
+      </g>
+      <path d="M-150 -215C-60 -240 60 -240 150 -215C280 -180 345 -70 345 40C345 170 230 250 0 250C-230 250 -345 170 -345 40C-345 -70 -280 -180 -150 -215Z" fill="#000"/>
+    </g>
+  </g>
 </svg>
