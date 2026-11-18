@@ -56,11 +56,9 @@ tasks:
       - >-
         {{.WINRES}} make --in build/windows/winres.json --arch {{.ARCH}} --out rsrc
         --file-version {{.NUMERIC_VERSION}}.0 --product-version {{.VERSION}}
-      - go build {{.FLAGS}} -o {{.BIN_DIR}}/{{.OUT}} .
-    env:
-      GOOS: windows
-      GOARCH: '{{.ARCH}}'
-      CGO_ENABLED: '0'
+      # Only the build targets Windows: go-winres, run above, is built for
+      # and run on the host, which in release CI is Linux.
+      - GOOS=windows GOARCH={{.ARCH}} CGO_ENABLED=0 go build {{.FLAGS}} -o {{.BIN_DIR}}/{{.OUT}} .
 
   # Without -H windowsgui the program keeps its console, so logs show in
   # the terminal.
