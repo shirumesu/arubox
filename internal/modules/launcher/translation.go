@@ -44,7 +44,7 @@ func (m *Module) translate(ctx context.Context, query string, always bool) []Res
 	case errors.Is(err, context.Canceled) || ctx.Err() != nil:
 		return nil
 	case !ok && always:
-		return []Result{{Kind: kindTranslation, Title: "翻译模块未启用", Subtitle: "在仪表盘里启用翻译模块后可用"}}
+		return []Result{{Kind: kindTranslation, Title: "翻译未开启", Subtitle: "在仪表盘里开启翻译后可用"}}
 	case !ok:
 		return nil
 	case err != nil:
@@ -99,4 +99,22 @@ const wordStartScore = 600
 
 func isEastAsian(r rune) bool {
 	return unicode.In(r, unicode.Han, unicode.Hiragana, unicode.Katakana, unicode.Hangul)
+}
+
+// languageNames name the translation module's languages, by Google
+// language code.
+var languageNames = map[string]string{
+	"zh-cn": "简体中文", "zh-tw": "繁体中文", "zh": "中文", "en": "英语", "ja": "日语", "ko": "韩语",
+	"fr": "法语", "de": "德语", "es": "西班牙语", "it": "意大利语", "pt": "葡萄牙语", "ru": "俄语",
+	"uk": "乌克兰语", "pl": "波兰语", "nl": "荷兰语", "tr": "土耳其语", "ar": "阿拉伯语", "th": "泰语",
+	"vi": "越南语", "id": "印尼语", "ms": "马来语",
+}
+
+// languageName names a language code, including detected ones outside the
+// list, which show as the code.
+func languageName(code string) string {
+	if n, ok := languageNames[strings.ToLower(code)]; ok {
+		return n
+	}
+	return strings.ToUpper(code)
 }

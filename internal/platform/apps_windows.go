@@ -70,9 +70,10 @@ func isUninstaller(name string) bool {
 	return strings.HasPrefix(n, "uninstall") || strings.HasPrefix(n, "卸载") || strings.Contains(n, " uninstall")
 }
 
-// Icon returns the icon of an app (by ID) or a file, as a PNG of the given
-// size in DIPs, at twice the pixels for high-DPI screens.
-func Icon(id string, size int) []byte {
+// iconInProcess draws the icon of an app (by ID) or a file, as a PNG of the
+// given size in DIPs, at twice the pixels for high-DPI screens. It loads
+// much of the shell, so only the icon helper calls it; see Icon.
+func iconInProcess(id string, size int) []byte {
 	target := id
 	if !strings.Contains(id, `:\`) && !strings.HasPrefix(id, `\\`) {
 		target = appsFolder + id
@@ -96,11 +97,9 @@ func Icon(id string, size int) []byte {
 	return buf.Bytes()
 }
 
-// ItemImage returns what File Explorer shows for a shell item, given by its
-// parsing name: a thumbnail where the item has one, its icon otherwise, at
-// most pixels wide and high. The pixels are BGRA with premultiplied alpha;
-// an empty Image means there is none.
-func ItemImage(parsingName string, pixels int) Image {
+// itemImageInProcess is ItemImage done in this process, which only the
+// icon helper does.
+func itemImageInProcess(parsingName string, pixels int) Image {
 	img := shellImage(parsingName, pixels, 0)
 	// Some thumbnails come without alpha; they are opaque.
 	opaque := true

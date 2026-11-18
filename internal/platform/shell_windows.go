@@ -888,6 +888,7 @@ func dropDragLeave(this uintptr) uintptr {
 	}
 	t.leaveShell()
 	t.end()
+	t.d.handler.DropLeft()
 	return sOK
 }
 

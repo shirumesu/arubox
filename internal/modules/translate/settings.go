@@ -38,13 +38,10 @@ type Settings struct {
 	DeepLKey string `json:"deeplKey"`
 	// Voice is where read aloud gets its voice: "system" or "edge".
 	Voice string `json:"voice"`
-	// KeepMinutes is how long the hidden popup is kept ready before its
-	// memory is released. 0 keeps it for good.
-	KeepMinutes int `json:"keepMinutes"`
 }
 
 func defaultSettings() Settings {
-	return Settings{Source: autoDetect, Target: "zh-CN", Second: "en", Engine: engineGoogle, Voice: voiceSystem, KeepMinutes: 30}
+	return Settings{Source: autoDetect, Target: "zh-CN", Second: "en", Engine: engineGoogle, Voice: voiceSystem}
 }
 
 func (s Settings) validate() error {
@@ -59,9 +56,6 @@ func (s Settings) validate() error {
 	}
 	if s.Voice != voiceSystem && s.Voice != voiceEdge {
 		return errors.New("未知的朗读声音")
-	}
-	if s.KeepMinutes < 0 {
-		return errors.New("保留时间不能为负数")
 	}
 	return nil
 }

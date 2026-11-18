@@ -186,6 +186,9 @@ type Canvas struct {
 	originX    float64
 	originY    float64
 	generation int // bumps when the target is recreated, invalidating bitmaps
+	// bitmaps are the bitmaps made on target. Each keeps the target, and so
+	// the whole picture, alive, so they are released with it.
+	bitmaps map[*Bitmap]struct{}
 }
 
 func newCanvas(width, height int, originX, originY float64) (*Canvas, error) {
@@ -193,15 +196,35 @@ func newCanvas(width, height int, originX, originY float64) (*Canvas, error) {
 		return nil, err
 	}
 	c := &Canvas{width: width, height: height, originX: originX, originY: originY}
-	if !succeeded(call(wicFactory, slotWICCreateBitmap, uintptr(width), uintptr(height),
-		uintptr(unsafe.Pointer(&guidWICPixelFormat32bppPBGRA)), wicBitmapCacheOnLoad, uintptr(unsafe.Pointer(&c.bitmap)))) {
-		return nil, errors.New("创建绘图表面失败")
-	}
-	if err := c.createTarget(); err != nil {
-		c.release()
+	if err := c.wake(); err != nil {
 		return nil, err
 	}
 	return c, nil
+}
+
+// asleep reports whether the canvas has given its picture back.
+func (c *Canvas) asleep() bool { return c.bitmap == nil }
+
+// sleep frees the picture and the target. The window keeps showing what
+// was last copied to it; drawing again wakes the canvas with a blank
+// picture, so only the part drawn then is valid.
+func (c *Canvas) sleep() { c.release() }
+
+// wake makes the picture and the target again after sleep.
+func (c *Canvas) wake() error {
+	if c.bitmap != nil {
+		return nil
+	}
+	if !succeeded(call(wicFactory, slotWICCreateBitmap, uintptr(c.width), uintptr(c.height),
+		uintptr(unsafe.Pointer(&guidWICPixelFormat32bppPBGRA)), wicBitmapCacheOnLoad, uintptr(unsafe.Pointer(&c.bitmap)))) {
+		c.bitmap = nil
+		return errors.New("创建绘图表面失败")
+	}
+	if err := c.createTarget(); err != nil {
+		c.release()
+		return err
+	}
+	return nil
 }
 
 func (c *Canvas) createTarget() error {
@@ -234,6 +257,9 @@ func (c *Canvas) createTarget() error {
 }
 
 func (c *Canvas) releaseTarget() {
+	for b := range c.bitmaps {
+		b.Release()
+	}
 	release(c.brush)
 	release(c.gdi)
 	release(c.target)
@@ -326,6 +352,7 @@ func (c *Canvas) PopClip() { call(c.target, slotRTPopAxisAlignedClip) }
 // Bitmap is a picture ready to draw on a canvas.
 type Bitmap struct {
 	obj        comObject
+	canvas     *Canvas
 	generation int
 	Width      int
 	Height     int
@@ -342,7 +369,12 @@ func (c *Canvas) NewBitmap(img Image) *Bitmap {
 	if !succeeded(call(c.target, slotRTCreateBitmap, size, uintptr(unsafe.Pointer(&img.Pixels[0])), uintptr(img.Width*4), uintptr(unsafe.Pointer(&props)), uintptr(unsafe.Pointer(&b)))) {
 		return nil
 	}
-	return &Bitmap{obj: b, generation: c.generation, Width: img.Width, Height: img.Height}
+	bm := &Bitmap{obj: b, canvas: c, generation: c.generation, Width: img.Width, Height: img.Height}
+	if c.bitmaps == nil {
+		c.bitmaps = map[*Bitmap]struct{}{}
+	}
+	c.bitmaps[bm] = struct{}{}
+	return bm
 }
 
 // Usable reports whether the bitmap belongs to the canvas's current target.
@@ -350,9 +382,10 @@ func (c *Canvas) Usable(b *Bitmap) bool { return b != nil && b.generation == c.g
 
 // Release frees the bitmap.
 func (b *Bitmap) Release() {
-	if b != nil {
+	if b != nil && b.obj != nil {
 		release(b.obj)
 		b.obj = nil
+		delete(b.canvas.bitmaps, b)
 	}
 }
 

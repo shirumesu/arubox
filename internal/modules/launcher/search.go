@@ -20,25 +20,28 @@ const (
 	kindTranslation = "translation"
 	kindCommand     = "command"
 	kindWeb         = "web"
+	// kindKeyword offers a keyword that starts with what was typed; the
+	// panel makes it and takes it as a tag.
+	kindKeyword = "keyword"
 )
 
 // Result is one row of the launcher.
 type Result struct {
-	// Kind is "app", "file", "folder", "calc", "currency", "time",
-	// "translation", "command" or "web". Calculations, conversions and times
+	// Kind is one of the kinds above. Calculations, conversions and times
 	// copy their Key, translations their Title.
-	Kind string `json:"kind"`
+	Kind string
 	// Key is what the result acts on: an app ID, a path, a calculated value,
-	// the text a translation is of, a command, or the keyword of a web
-	// search, whose Title is the query.
-	Key      string `json:"key"`
-	Title    string `json:"title"`
-	Subtitle string `json:"subtitle"`
-	// Icon is a data URL, or empty for kinds the page draws itself.
-	Icon string `json:"icon,omitempty"`
+	// the text a translation is of, a command, the keyword of a web search,
+	// whose Title is the query, or an offered keyword.
+	Key      string
+	Title    string
+	Subtitle string
+	// Icon is the key of the shell icon of Key in the module's cache, or
+	// empty for kinds the panel draws a glyph for.
+	Icon string
 	// Source and Target are a translation's language codes.
-	Source string `json:"source,omitempty"`
-	Target string `json:"target,omitempty"`
+	Source string
+	Target string
 }
 
 // maxResults is how many rows of each source the launcher shows.

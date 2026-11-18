@@ -14,17 +14,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/wailsapp/wails/v3/pkg/application"
-
 	"github.com/shirumesu/arubox/internal/platform"
 )
-
-// stateEvent carries the updater's state to the dashboard on every change.
-const stateEvent = "update:state"
-
-func init() {
-	application.RegisterEvent[State](stateEvent)
-}
 
 // checkEvery is how often a running program looks for a new release.
 const checkEvery = 6 * time.Hour
@@ -99,8 +90,9 @@ type Updater struct {
 	log       *slog.Logger
 	installed version
 	client    *http.Client
-	app       *application.App
-	changed   func(State)
+	quit      func()
+	watchMu   sync.Mutex
+	watchers  []func(State)
 	// ctx ends with the program, which gives up a check or a download.
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -138,16 +130,19 @@ func New(store Store, log *slog.Logger, installed string) (*Updater, error) {
 	return u, nil
 }
 
-// Service is what the dashboard calls.
-func (u *Updater) Service() application.Service {
-	return application.NewService(&Service{updater: u})
+// OnChange calls f, on the updater's goroutine, on every change of the
+// state.
+func (u *Updater) OnChange(f func(State)) {
+	u.watchMu.Lock()
+	u.watchers = append(u.watchers, f)
+	u.watchMu.Unlock()
 }
 
 // Start removes what an earlier update left behind and checks for a new
-// release now and every few hours. changed is called on every change of
-// the state.
-func (u *Updater) Start(app *application.App, changed func(State)) {
-	u.app, u.changed = app, changed
+// release now and every few hours. quit ends the program, for the restart
+// after an update.
+func (u *Updater) Start(quit func()) {
+	u.quit = quit
 	if u.state.Unavailable != "" {
 		return
 	}
@@ -194,8 +189,12 @@ func (u *Updater) update(fn func(s *State)) State {
 	fn(&u.state)
 	s := u.state
 	u.mu.Unlock()
-	u.app.Event.Emit(stateEvent, s)
-	u.changed(s)
+	u.watchMu.Lock()
+	ws := append([]func(State){}, u.watchers...)
+	u.watchMu.Unlock()
+	for _, f := range ws {
+		f(s)
+	}
 	return s
 }
 
@@ -307,7 +306,7 @@ func (u *Updater) install() error {
 		})
 		return err
 	}
-	u.app.Quit()
+	u.quit()
 	return nil
 }
 
@@ -342,27 +341,19 @@ func (u *Updater) setPrereleases(on bool) (State, error) {
 	return s, nil
 }
 
-// Service is the dashboard's view of the updater.
-type Service struct {
-	updater *Updater
-}
-
-// State returns the current state.
-func (s *Service) State() State { return s.updater.State() }
-
 // Check looks for a newer release now. The state it returns tells how it
 // went, a failure included.
-func (s *Service) Check() State {
-	st, _ := s.updater.check()
+func (u *Updater) Check() State {
+	st, _ := u.check()
 	return st
 }
 
 // Install downloads and installs the release on offer, then restarts the
-// program. Progress and failures arrive as update:state events.
-func (s *Service) Install() {
-	_ = s.updater.install()
+// program. Progress and failures arrive through OnChange.
+func (u *Updater) Install() {
+	_ = u.install()
 }
 
 // SetPrereleases sets whether alpha and beta versions are offered, and
 // checks again.
-func (s *Service) SetPrereleases(on bool) (State, error) { return s.updater.setPrereleases(on) }
+func (u *Updater) SetPrereleases(on bool) (State, error) { return u.setPrereleases(on) }

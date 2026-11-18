@@ -33,15 +33,21 @@ linters:
         - G301 # 0755 directories are intended for settings and logs
         - G302
         - G304 # file paths come from the user's own config/log directories
+        - G115 # integer conversions are to pixel bytes and system types, bounded where they are made
   exclusions:
     presets:
       - std-error-handling
     rules:
-      # System calls need unsafe pointers and fixed-width conversions; they
-      # are confined to the platform layer and the ONNX Runtime binding.
-      - path: internal/(platform|fileindex|ort)/
+      # System calls need unsafe pointers; they are confined to the platform
+      # and UI layers, the ONNX Runtime binding and the speech players.
+      - path: internal/(platform|fileindex|ort|ui)/|internal/modules/translate/(aloud|mci|sapi)\.go
         linters: [gosec]
-        text: "G103|G115"
+        text: "G103"
+      # A window procedure gets pointers to structures as an LPARAM, and
+      # GlobalLock returns its memory as an integer.
+      - path: internal/(ui/(app|window)|platform/cliptext_windows)\.go
+        linters: [govet]
+        text: "possible misuse of unsafe.Pointer"
 
 formatters:
   enable:

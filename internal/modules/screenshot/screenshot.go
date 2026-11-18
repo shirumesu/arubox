@@ -6,21 +6,20 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"image"
 	"image/jpeg"
 	"image/png"
 	"log/slog"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/wailsapp/wails/v3/pkg/application"
-
 	"github.com/shirumesu/arubox/internal/hotkey"
 	"github.com/shirumesu/arubox/internal/module"
 	"github.com/shirumesu/arubox/internal/platform"
+	"github.com/shirumesu/arubox/internal/ui"
 )
 
 const id = "screenshot"
@@ -46,22 +45,10 @@ type TextReader interface {
 	ImageText(img platform.Image) ([]platform.TextLine, error)
 }
 
-// Settings is what the user can change about the module.
-type Settings struct {
-	// KeepMinutes is how long the hidden editor is kept ready before its
-	// memory is released. 0 keeps it for good.
-	KeepMinutes int `json:"keepMinutes"`
-}
-
-// stored is what the module keeps in the settings file: the settings and
-// the folder pictures were last saved to.
+// stored is what the module keeps in the settings file: the folder
+// pictures were last saved to.
 type stored struct {
-	Settings
 	SaveDir string `json:"saveDir,omitempty"`
-}
-
-func defaultStored() stored {
-	return stored{Settings: Settings{KeepMinutes: 30}}
 }
 
 // jpegQuality is used when a picture is saved as JPEG.
@@ -73,27 +60,31 @@ type Module struct {
 	reader     TextReader
 	log        *slog.Logger
 	translator Translator
-	pins       *pins
 
 	mu      sync.Mutex
 	stored  stored
-	app     *application.App
-	overlay *overlay // nil while disabled
-	seq     int
-	screen  application.Rect // the captured screen, in points
-	image   platform.Image   // the capture being edited, if any
-	asked   bool             // the screen recording permission was asked for
+	enabled bool
+	// busy is set from the moment a capture is taken until its editor
+	// closes, so the hotkey pressed again meanwhile does nothing.
+	busy bool
+
+	// On the UI thread only.
+	overlay *overlay
+	pins    pins
+	// The colour and width last picked, kept from one capture to the next.
+	color int
+	width float64
 }
 
 // New creates the module. It does nothing until enabled. translator may be
 // nil, which leaves translation out.
 func New(store Store, log *slog.Logger, reader TextReader, translator Translator) *Module {
-	s := defaultStored()
+	var s stored
 	if err := store.ModuleSettings(id, &s); err != nil {
 		log.Warn("screenshot settings unreadable, using defaults", "error", err)
-		s = defaultStored()
+		s = stored{}
 	}
-	return &Module{store: store, reader: reader, log: log, translator: translator, stored: s, pins: &pins{}}
+	return &Module{store: store, reader: reader, log: log, translator: translator, stored: s, width: widths[1]}
 }
 
 // Info describes the module.
@@ -102,232 +93,167 @@ func (m *Module) Info() module.Info {
 		ID:          id,
 		Name:        "截图",
 		Description: "框选区域或窗口截图，标注后复制、保存或贴在屏幕上，也可以识别或翻译其中的文字。",
-		Platforms:   []string{"darwin", "windows"},
-	}
-}
-
-// Services binds the editor, the pins and the settings page, and serves
-// the pictures to them.
-func (m *Module) Services() []application.Service {
-	return []application.Service{
-		application.NewService(&Service{module: m}),
-		application.NewServiceWithOptions(&images{module: m}, application.ServiceOptions{Route: imageRoute}),
+		Icon:        ui.IconCamera,
 	}
 }
 
 // Hotkeys declares the hotkey.
 func (m *Module) Hotkeys() []hotkey.Def {
-	capture := "Alt+w"
-	if runtime.GOOS == "windows" {
-		capture = "Alt+Shift+w"
-	}
-	return []hotkey.Def{{ID: "capture", Label: "截图", Default: capture, Action: m.capture}}
+	return []hotkey.Def{{ID: "capture", Label: "截图", Default: "Alt+Shift+w", Action: m.capture}}
 }
 
-// Enable loads the editor in the background so the first capture shows
-// without delay.
-func (m *Module) Enable(ctx module.Context) error {
+// Enable readies the screen capture device in the background, so the
+// first capture is as quick as the next. The editor's window is made for
+// each capture and closed after it, so nothing else is held.
+func (m *Module) Enable(module.Context) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.app = ctx.App
-	m.pins.app = ctx.App
-	m.overlay = newOverlay(ctx.App, m.keepTime, m.keepLocked(), m.dropImage)
-	go platform.PrepareScreenCapture()
+	m.enabled = true
+	m.mu.Unlock()
 	return nil
 }
 
 // Disable closes the editor and every pin.
 func (m *Module) Disable() error {
 	m.mu.Lock()
-	o := m.overlay
-	m.overlay = nil
-	m.image = platform.Image{}
+	m.enabled = false
 	m.mu.Unlock()
-	if o != nil {
-		o.mu.Lock()
-		o.destroy()
-		o.mu.Unlock()
+	if m.overlay != nil {
+		m.overlay.end()
 	}
 	m.pins.closeAll()
 	return nil
 }
 
-func (m *Module) keepTime() time.Duration {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.keepLocked()
-}
+// Settings returns nil: the dashboard's own rows enable the module and
+// bind its hotkey, and there is nothing else to set.
+func (m *Module) Settings() module.Page { return nil }
 
-// keepLocked is keepTime with m.mu held.
-func (m *Module) keepLocked() time.Duration {
-	return time.Duration(m.stored.KeepMinutes) * time.Minute
-}
-
-func (m *Module) currentOverlay() *overlay {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.overlay
-}
-
-// capture freezes the screen under the mouse and opens the editor on it.
+// capture freezes the display under the mouse and opens the editor on it.
+// It runs on the hotkey's goroutine, so the capture does not hold up the
+// UI thread.
 func (m *Module) capture() {
-	o := m.currentOverlay()
-	if o == nil || o.visible() {
+	m.mu.Lock()
+	if !m.enabled || m.busy {
+		m.mu.Unlock()
 		return
 	}
-	if !platform.ScreenCaptureAllowed() {
-		m.askPermission()
-		return
-	}
-	screen := m.app.Screen.ScreenNearestDipPoint(platform.CursorPosition()).Bounds
-	img, err := platform.CaptureScreen(screen)
-	if errors.Is(err, platform.ErrNoScreenCapture) {
-		m.askPermission()
-		return
-	}
+	m.busy = true
+	m.mu.Unlock()
+	x, y := ui.CursorPos()
+	display := ui.MonitorAt(x, y)
+	b := display.Bounds
+	img, err := platform.CaptureScreen(platform.Rect{X: b.X, Y: b.Y, Width: b.W, Height: b.H})
 	if err != nil {
 		m.log.Warn("capture screen", "error", err)
+		m.idle()
 		return
 	}
-	start := Start{
-		Width:     screen.Width,
-		Height:    screen.Height,
-		Picture:   img.Picture(),
-		Windows:   windowsOn(screen, platform.OnScreenWindows()),
-		Translate: m.translator != nil && m.translator.Available(),
+	// The window draws the pixels as premultiplied, which needs them
+	// opaque; the screen's alpha is not always set.
+	for i := 3; i < len(img.Pixels); i += 4 {
+		img.Pixels[i] = 255
 	}
-	m.mu.Lock()
-	m.seq++
-	start.Seq = m.seq
-	m.screen, m.image = screen, img
-	m.mu.Unlock()
-	o.open(start, screen)
-}
-
-// askPermission shows the system's prompt the first time and opens System
-// Settings after that, when the prompt no longer appears.
-func (m *Module) askPermission() {
-	m.mu.Lock()
-	asked := m.asked
-	m.asked = true
-	m.mu.Unlock()
-	if asked {
-		platform.OpenScreenCaptureSettings()
-		return
+	start := start{
+		display:   display,
+		image:     img,
+		windows:   platform.OnScreenWindows(),
+		translate: m.translator != nil && m.translator.Available(),
+		cursor:    ui.Point{X: float64(x - b.X), Y: float64(y - b.Y)},
 	}
-	platform.RequestScreenCapture()
-}
-
-// windowsOn returns the windows that overlap screen, relative to it and
-// clipped to it.
-func windowsOn(screen application.Rect, windows []application.Rect) []application.Rect {
-	out := []application.Rect{}
-	for _, w := range windows {
-		x0, y0 := max(w.X, screen.X), max(w.Y, screen.Y)
-		x1, y1 := min(w.X+w.Width, screen.X+screen.Width), min(w.Y+w.Height, screen.Y+screen.Height)
-		if x1 > x0 && y1 > y0 {
-			out = append(out, application.Rect{X: x0 - screen.X, Y: y0 - screen.Y, Width: x1 - x0, Height: y1 - y0})
+	ui.Post(func() {
+		m.mu.Lock()
+		enabled := m.enabled
+		m.mu.Unlock()
+		if !enabled {
+			m.idle()
+			return
 		}
-	}
-	return out
+		o, err := openOverlay(m, start)
+		if err != nil {
+			m.log.Warn("open screenshot editor", "error", err)
+			m.idle()
+			return
+		}
+		m.overlay = o
+	})
 }
 
-// currentImage returns the capture being edited.
-func (m *Module) currentImage() (platform.Image, bool) {
+// idle lets the hotkey take the next capture.
+func (m *Module) idle() {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.image, m.image.Width > 0
-}
-
-// dropImage lets go of the capture once the editor hides.
-func (m *Module) dropImage() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.image = platform.Image{}
-}
-
-// finish hides the editor of capture seq.
-func (m *Module) finish(seq int) {
-	if o := m.currentOverlay(); o != nil {
-		o.close(seq)
-	}
-}
-
-// recognize reads the lines of text in part of capture seq, given in its
-// pixels. The editor stays open meanwhile, so it can show a failure.
-func (m *Module) recognize(seq int, r application.Rect) ([]platform.TextLine, error) {
-	m.mu.Lock()
-	img, current := m.image, seq == m.seq
+	m.busy = false
 	m.mu.Unlock()
-	if !current || img.Width == 0 {
-		return nil, errors.New("截图已失效")
+}
+
+// recognize reads the lines of text in a picture.
+func (m *Module) recognize(img platform.Image) ([]platform.TextLine, error) {
+	if img.Width == 0 || img.Height == 0 {
+		return nil, errors.New("没有选区")
 	}
-	lines, err := m.reader.ImageText(img.Crop(r.X, r.Y, r.Width, r.Height))
+	lines, err := m.reader.ImageText(img)
 	if err == nil && len(lines) == 0 {
 		err = errors.New("没有识别到文字")
 	}
 	return lines, err
 }
 
-// readText returns the text in part of capture seq, line by line as shown.
-func (m *Module) readText(seq int, r application.Rect) (string, error) {
-	lines, err := m.recognize(seq, r)
-	if err != nil {
-		return "", err
-	}
+// joinLines returns the text of lines one per line, as they were shown.
+func joinLines(lines []platform.TextLine) string {
 	texts := make([]string, 0, len(lines))
 	for _, l := range lines {
 		texts = append(texts, l.Text)
 	}
-	return strings.Join(texts, "\n"), nil
+	return strings.Join(texts, "\n")
 }
 
-// copyText closes the editor of capture seq and copies text.
-func (m *Module) copyText(seq int, text string) error {
-	m.finish(seq)
-	if !m.app.Clipboard.SetText(text) {
-		return errors.New("复制失败")
+// picture is a finished picture: opaque top-down BGRA pixels.
+type picture platform.Image
+
+// rgba converts the picture to the standard library's image type. Being
+// opaque, its pixels need no premultiplying.
+func (p picture) rgba() *image.RGBA {
+	out := image.NewRGBA(image.Rect(0, 0, p.Width, p.Height))
+	for i := 0; i+3 < len(p.Pixels) && i+3 < len(out.Pix); i += 4 {
+		out.Pix[i], out.Pix[i+1], out.Pix[i+2], out.Pix[i+3] = p.Pixels[i+2], p.Pixels[i+1], p.Pixels[i], 255
 	}
-	return nil
+	return out
 }
 
-// translate shows the text in part of capture seq in the translation popup,
-// with lines broken inside a sentence joined back.
-func (m *Module) translate(seq int, r application.Rect) error {
-	if m.translator == nil || !m.translator.Available() {
-		return errors.New("翻译模块未启用")
+// png encodes the picture; fast trades size for speed, for the clipboard.
+func (p picture) png(fast bool) ([]byte, error) {
+	enc := png.Encoder{}
+	if fast {
+		enc.CompressionLevel = png.BestSpeed
 	}
-	lines, err := m.recognize(seq, r)
+	var b bytes.Buffer
+	if err := enc.Encode(&b, p.rgba()); err != nil {
+		return nil, err
+	}
+	return b.Bytes(), nil
+}
+
+// copyPicture puts a picture on the clipboard. It runs on a goroutine of
+// its own: encoding a large picture takes a moment.
+func (m *Module) copyPicture(p picture) {
+	data, err := p.png(true)
+	if err == nil {
+		err = platform.CopyImage(data)
+	}
 	if err != nil {
-		return err
+		m.log.Warn("copy screenshot", "error", err)
 	}
-	m.finish(seq)
-	m.translator.Open(platform.Paragraphs(lines))
-	return nil
 }
 
-// copyImage puts the finished picture on the clipboard.
-func (m *Module) copyImage(seq int, pngData []byte) error {
-	m.finish(seq)
-	return platform.CopyImage(pngData)
+// savePicture asks where to save a picture, as PNG or, by the name's
+// extension, JPEG. It runs on a goroutine of its own, as the dialog
+// blocks.
+func (m *Module) savePicture(p picture) {
+	if err := m.save(p); err != nil {
+		m.log.Warn("save screenshot", "error", err)
+	}
 }
 
-// pin pins the finished picture where it was selected, at r relative to
-// the captured screen.
-func (m *Module) pin(seq int, pngData []byte, r application.Rect) {
-	m.mu.Lock()
-	screen := m.screen
-	m.mu.Unlock()
-	m.finish(seq)
-	r.X += screen.X
-	r.Y += screen.Y
-	m.pins.add(pngData, r)
-}
-
-// save asks where to save the finished picture, as PNG or, by the name's
-// extension, JPEG.
-func (m *Module) save(seq int, pngData []byte) error {
-	m.finish(seq)
+func (m *Module) save(p picture) error {
 	m.mu.Lock()
 	dir := m.stored.SaveDir
 	m.mu.Unlock()
@@ -336,39 +262,33 @@ func (m *Module) save(seq int, pngData []byte) error {
 			dir = filepath.Join(home, "Desktop")
 		}
 	}
-	path, err := m.app.Dialog.SaveFile().
-		SetFilename(time.Now().Format("截图 2006-01-02 15.04.05")+".png").
-		SetDirectory(dir).
-		CanCreateDirectories(true).
-		AddFilter("PNG 图片", "*.png").
-		AddFilter("JPEG 图片", "*.jpg;*.jpeg").
-		PromptForSingleSelection()
+	path, err := ui.SaveFileDialog(ui.SaveFileOptions{
+		Title: "保存截图",
+		Dir:   dir,
+		Name:  time.Now().Format("截图 2006-01-02 15.04.05") + ".png",
+		Types: []ui.FileType{
+			{Name: "PNG 图片", Patterns: []string{"*.png"}},
+			{Name: "JPEG 图片", Patterns: []string{"*.jpg", "*.jpeg"}},
+		},
+	})
 	if err != nil || path == "" {
 		return err
 	}
-	data := pngData
+	var data []byte
 	if ext := strings.ToLower(filepath.Ext(path)); ext == ".jpg" || ext == ".jpeg" {
-		if data, err = toJPEG(pngData); err != nil {
+		var b bytes.Buffer
+		if err := jpeg.Encode(&b, p.rgba(), &jpeg.Options{Quality: jpegQuality}); err != nil {
 			return err
 		}
+		data = b.Bytes()
+	} else if data, err = p.png(false); err != nil {
+		return err
 	}
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		return fmt.Errorf("保存失败：%w", err)
 	}
 	m.rememberDir(filepath.Dir(path))
 	return nil
-}
-
-func toJPEG(pngData []byte) ([]byte, error) {
-	img, err := png.Decode(bytes.NewReader(pngData))
-	if err != nil {
-		return nil, err
-	}
-	var b bytes.Buffer
-	if err := jpeg.Encode(&b, img, &jpeg.Options{Quality: jpegQuality}); err != nil {
-		return nil, err
-	}
-	return b.Bytes(), nil
 }
 
 func (m *Module) rememberDir(dir string) {
@@ -381,25 +301,4 @@ func (m *Module) rememberDir(dir string) {
 		return
 	}
 	m.stored = next
-}
-
-func (m *Module) currentSettings() Settings {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.stored.Settings
-}
-
-func (m *Module) setSettings(s Settings) error {
-	if s.KeepMinutes < 0 {
-		return errors.New("保留时间不能为负数")
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	next := m.stored
-	next.Settings = s
-	if err := m.store.SetModuleSettings(id, next); err != nil {
-		return errors.New("保存设置失败：" + err.Error())
-	}
-	m.stored = next
-	return nil
 }

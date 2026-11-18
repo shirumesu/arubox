@@ -2,29 +2,18 @@ version: '3'
 
 vars:
   APP_NAME: arubox
-  # The one place the version is written. The bundle's Info.plist, the
-  # executable's version resource and the build itself take it from here;
-  # release CI checks the tag and CHANGELOG.md against it.
-  VERSION: 0.1.0
-  # Windows and the bundle's build number want plain numbers, so a
-  # prerelease uses those of the release it leads to.
+  # The one place the version is written. The executable's version resource
+  # and the build itself take it from here; release CI checks the tag and
+  # CHANGELOG.md against it.
+  VERSION: 0.2.0
+  # Windows wants plain numbers, so a prerelease uses those of the release
+  # it leads to.
   NUMERIC_VERSION: '{{index (splitList "-" .VERSION) 0}}'
-  # The identity app bundles are signed with, and the keychain that holds
-  # it when that is not on the search list. Without an identity they are
-  # signed ad hoc; scripts/package.sh says why releases need a certificate.
-  SIGN_IDENTITY: '{{.ARUBOX_SIGN_IDENTITY | default "-"}}'
-  SIGN_KEYCHAIN: '{{.ARUBOX_SIGN_KEYCHAIN}}'
   BIN_DIR: bin
-  VITE_PORT: '{{.WAILS_VITE_PORT | default 9245}}'
   LDFLAGS_VERSION: -X github.com/shirumesu/arubox/internal/core.Version={{.VERSION}}
-  # Production builds drop the Wails dev server proxy and devtools.
-  PROD_FLAGS: -trimpath -buildvcs=false
-  DEV_FLAGS: -buildvcs=false -gcflags=all="-l"
-
-env:
-  MACOSX_DEPLOYMENT_TARGET: '14.0'
-  CGO_CFLAGS: -mmacosx-version-min=14.0
-  CGO_LDFLAGS: -mmacosx-version-min=14.0
+  # go-winres writes the icon, manifest and version resource the linker
+  # picks up as a .syso file.
+  WINRES: go run github.com/tc-hib/go-winres@v0.3.3
 
 tasks:
   default:
@@ -36,49 +25,16 @@ tasks:
     cmds:
       - echo {{.VERSION}}
 
-  install:
-    desc: Install frontend dependencies
-    dir: frontend
-    sources: [package.json, pnpm-lock.yaml]
-    generates: [node_modules/.modules.yaml]
-    cmds:
-      - pnpm install --frozen-lockfile
-
-  bindings:
-    desc: Generate TypeScript bindings for the Go services
-    sources: ['**/*.go', go.mod, go.sum]
-    generates: [frontend/bindings/**/*]
-    cmds:
-      - wails generate bindings -clean=true -ts -i ./...
-
-  frontend:
-    desc: Build the frontend into frontend/dist
-    deps: [install, bindings]
-    dir: frontend
-    sources: ['src/**/*', 'bindings/**/*', index.html, package.json, vite.config.ts, tsconfig.json]
-    generates: [dist/**/*]
-    cmds:
-      - pnpm run build
-
   icons:
-    desc: Render every icon from the SVG sources in build/icons
+    desc: Render the icons from the SVG sources in build/icons
     cmds:
-      - rsvg-convert -w 1024 -h 1024 build/icons/appicon.svg -o build/appicon.png
+      - rsvg-convert -w 256 -h 256 build/icons/appicon.svg -o build/appicon.png
       - rsvg-convert -w 32 -h 32 build/icons/tray.svg -o internal/core/assets/tray.png
-      - rsvg-convert -w 44 -h 44 build/icons/tray-template.svg -o internal/core/assets/tray-template.png
-      - wails generate icons -input build/appicon.png -macfilename build/darwin/icons.icns -windowsfilename build/windows/icon.ico
+      - '{{.WINRES}} icon -o build/windows/icon.ico build/appicon.png'
+      - cp build/windows/icon.ico internal/core/assets/app.ico
 
   build:
-    desc: Build the macOS app bundle (bin/arubox.app)
-    deps: [frontend]
-    cmds:
-      - go build -tags production {{.PROD_FLAGS}} -ldflags="-w -s {{.LDFLAGS_VERSION}}" -o {{.BIN_DIR}}/{{.APP_NAME}} .
-      - task: bundle
-        vars: {BUNDLE: '{{.APP_NAME}}.app', PLIST: build/darwin/Info.plist}
-
-  build:windows:
-    desc: Build bin/arubox.exe for Windows, natively or cross-compiled (ARCH=amd64 or arm64)
-    deps: [frontend]
+    desc: Build bin/arubox.exe, natively or cross-compiled (ARCH=amd64 or arm64)
     vars:
       ARCH: '{{.ARCH | default "amd64"}}'
     cmds:
@@ -86,97 +42,55 @@ tasks:
         vars:
           ARCH: '{{.ARCH}}'
           OUT: '{{.APP_NAME}}.exe'
-          FLAGS: -tags production {{.PROD_FLAGS}} -ldflags="-w -s -H windowsgui {{.LDFLAGS_VERSION}}"
+          FLAGS: -trimpath -buildvcs=false -ldflags="-w -s -H windowsgui {{.LDFLAGS_VERSION}}"
 
   exe:
     internal: true
     vars:
-      INFO: '{{.BIN_DIR}}/info-{{.ARCH}}.json'
+      SYSO: rsrc_windows_{{.ARCH}}.syso
     cmds:
-      - defer: rm -f {{.APP_NAME}}_windows_{{.ARCH}}.syso {{.INFO}}
+      - defer: rm -f {{.SYSO}}
       - mkdir -p {{.BIN_DIR}}
-      # The version resource shown in the file's properties.
+      # build/windows/winres.json holds the icon, the manifest (per-monitor
+      # DPI, common controls 6) and the version resource's names.
       - >-
-        printf '{"fixed":{"file_version":"%s","product_version":"%s"},"info":{"0409":{"FileVersion":"%s","ProductVersion":"%s","FileDescription":"%s","ProductName":"%s"}}}'
-        {{.NUMERIC_VERSION}} {{.NUMERIC_VERSION}} {{.VERSION}} {{.VERSION}} {{.APP_NAME}} {{.APP_NAME}}
-        > {{.INFO}}
-      - >-
-        wails generate syso -arch {{.ARCH}}
-        -icon build/windows/icon.ico
-        -manifest build/windows/arubox.exe.manifest
-        -info {{.INFO}}
-        -out {{.APP_NAME}}_windows_{{.ARCH}}.syso
+        {{.WINRES}} make --in build/windows/winres.json --arch {{.ARCH}} --out rsrc
+        --file-version {{.NUMERIC_VERSION}}.0 --product-version {{.VERSION}}
       - go build {{.FLAGS}} -o {{.BIN_DIR}}/{{.OUT}} .
     env:
       GOOS: windows
       GOARCH: '{{.ARCH}}'
       CGO_ENABLED: '0'
 
-  bundle:
-    internal: true
-    vars:
-      APP: '{{.BIN_DIR}}/{{.BUNDLE}}'
-    cmds:
-      - rm -rf "{{.APP}}"
-      - mkdir -p "{{.APP}}/Contents/MacOS" "{{.APP}}/Contents/Resources"
-      - cp {{.BIN_DIR}}/{{.APP_NAME}} "{{.APP}}/Contents/MacOS/{{.APP_NAME}}"
-      - cp build/darwin/icons.icns "{{.APP}}/Contents/Resources/"
-      - cp {{.PLIST}} "{{.APP}}/Contents/Info.plist"
-      - plutil -insert CFBundleShortVersionString -string {{.VERSION}} "{{.APP}}/Contents/Info.plist"
-      - plutil -insert CFBundleVersion -string {{.NUMERIC_VERSION}} "{{.APP}}/Contents/Info.plist"
-      - xattr -cr "{{.APP}}"
-      - codesign --force --sign "{{.SIGN_IDENTITY}}" {{if .SIGN_KEYCHAIN}}--keychain "{{.SIGN_KEYCHAIN}}"{{end}} --timestamp=none "{{.APP}}"
-
+  # Without -H windowsgui the program keeps its console, so logs show in
+  # the terminal.
   run:
-    desc: Build a development build for this system and run it (used by `task dev`)
-    deps: [frontend]
-    cmds:
-      - task: run:darwin
-      - task: run:windows
-
-  run:darwin:
-    internal: true
-    platforms: [darwin]
-    cmds:
-      - go build {{.DEV_FLAGS}} -ldflags="{{.LDFLAGS_VERSION}}-dev" -o {{.BIN_DIR}}/{{.APP_NAME}} .
-      - task: bundle
-        vars: {BUNDLE: '{{.APP_NAME}}.dev.app', PLIST: build/darwin/Info.dev.plist}
-      - '"{{.BIN_DIR}}/{{.APP_NAME}}.dev.app/Contents/MacOS/{{.APP_NAME}}"'
-
-  # Without -H windowsgui the app keeps its console, so logs show in the terminal.
-  run:windows:
-    internal: true
-    platforms: [windows]
+    desc: Build a development build and run it
     cmds:
       - task: exe
         vars:
           ARCH: '{{ARCH}}'
           OUT: '{{.APP_NAME}}.dev.exe'
-          FLAGS: '{{.DEV_FLAGS}} -ldflags="{{.LDFLAGS_VERSION}}-dev"'
+          FLAGS: -buildvcs=false -ldflags="{{.LDFLAGS_VERSION}}-dev"
       - '"{{.BIN_DIR}}/{{.APP_NAME}}.dev.exe"'
 
-  dev:
-    desc: Run with frontend hot reload; Go changes rebuild and restart the app
+  test:
+    desc: Run the Go tests
+    env:
+      GOOS: windows
+      CGO_ENABLED: '0'
     cmds:
-      - wails dev -config ./build/config.yml -port {{.VITE_PORT}}
-
-  dev:frontend:
-    desc: Run only the Vite dev server (started by `task dev`)
-    deps: [install, bindings]
-    dir: frontend
-    cmds:
-      - pnpm exec vite --port {{.VITE_PORT}} --strictPort
+      - go test ./...
 
   lint:
-    desc: Lint Go (for both macOS and Windows) and the frontend
-    deps: [bindings, install]
+    desc: Lint the Go code
+    env:
+      GOOS: windows
+      CGO_ENABLED: '0'
     cmds:
       - golangci-lint run ./...
-      - GOOS=windows CGO_ENABLED=0 golangci-lint run ./...
-      - cd frontend && pnpm run lint
 
   fmt:
-    desc: Format Go and frontend sources
+    desc: Format the Go code
     cmds:
       - golangci-lint fmt ./...
-      - cd frontend && pnpm run format

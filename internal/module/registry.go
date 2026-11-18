@@ -2,7 +2,6 @@ package module
 
 import (
 	"fmt"
-	"runtime"
 	"slices"
 	"sync"
 
@@ -20,20 +19,17 @@ type Status struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`
 	Description string `json:"description"`
-	// Supported is false when the module does not run on this system. Such
-	// modules are listed but cannot be enabled.
-	Supported bool `json:"supported"`
-	Enabled   bool `json:"enabled"`
+	Icon        rune   `json:"-"`
+	Enabled     bool   `json:"enabled"`
 	// Error explains why the module failed to start.
 	Error string `json:"error,omitempty"`
 }
 
 type slot struct {
-	module    Module
-	info      Info
-	supported bool
-	enabled   bool
-	err       string
+	module  Module
+	info    Info
+	enabled bool
+	err     string
 }
 
 // Registry is safe for concurrent use.
@@ -46,9 +42,9 @@ type Registry struct {
 	slots []*slot
 }
 
-// NewRegistry registers modules. Hotkeys of modules that run on this system
-// are declared right away so they show up in the dashboard and take part in
-// conflict detection even while the module is disabled.
+// NewRegistry registers modules. Their hotkeys are declared right away so
+// they show up in the dashboard and take part in conflict detection even
+// while the module is disabled.
 func NewRegistry(ctx Context, store Store, hotkeys *hotkey.Manager, modules []Module) *Registry {
 	r := &Registry{ctx: ctx, store: store, hotkeys: hotkeys}
 	seen := map[string]bool{}
@@ -58,10 +54,8 @@ func NewRegistry(ctx Context, store Store, hotkeys *hotkey.Manager, modules []Mo
 			panic("module: duplicate id " + info.ID)
 		}
 		seen[info.ID] = true
-		s := &slot{module: m, info: info, supported: slices.Contains(info.Platforms, runtime.GOOS)}
-		if s.supported {
-			hotkeys.Define(info.ID, info.Name, m.Hotkeys())
-		}
+		s := &slot{module: m, info: info}
+		hotkeys.Define(info.ID, info.Name, m.Hotkeys())
 		r.slots = append(r.slots, s)
 	}
 	return r
@@ -72,7 +66,7 @@ func (r *Registry) Start() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, s := range r.slots {
-		if s.supported && r.store.ModuleEnabled(s.info.ID) {
+		if r.store.ModuleEnabled(s.info.ID) {
 			if err := r.enable(s); err != nil {
 				r.ctx.Log.Error("enable module", "module", s.info.ID, "error", err)
 			}
@@ -100,9 +94,6 @@ func (r *Registry) SetEnabled(id string, enabled bool) error {
 		return fmt.Errorf("unknown module %q", id)
 	}
 	s := r.slots[i]
-	if enabled && !s.supported {
-		return fmt.Errorf("「%s」不支持当前系统", s.info.Name)
-	}
 	if enabled == s.enabled {
 		return nil
 	}
@@ -119,6 +110,17 @@ func (r *Registry) SetEnabled(id string, enabled bool) error {
 	return nil
 }
 
+// Modules returns every module in registration order.
+func (r *Registry) Modules() []Module {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]Module, len(r.slots))
+	for i, s := range r.slots {
+		out[i] = s.module
+	}
+	return out
+}
+
 // List returns every module in registration order.
 func (r *Registry) List() []Status {
 	r.mu.Lock()
@@ -129,7 +131,7 @@ func (r *Registry) List() []Status {
 			ID:          s.info.ID,
 			Name:        s.info.Name,
 			Description: s.info.Description,
-			Supported:   s.supported,
+			Icon:        s.info.Icon,
 			Enabled:     s.enabled,
 			Error:       s.err,
 		})

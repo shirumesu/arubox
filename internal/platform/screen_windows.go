@@ -6,7 +6,6 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/wailsapp/wails/v3/pkg/application"
 	"golang.org/x/sys/windows"
 )
 
@@ -61,25 +60,14 @@ const (
 	asyncCompleted      = 1
 )
 
-// ScreenCaptureAllowed reports whether arubox may read the screen. Windows
-// has no such permission.
-func ScreenCaptureAllowed() bool { return true }
-
-// RequestScreenCapture does nothing on Windows.
-func RequestScreenCapture() {}
-
-// OpenScreenCaptureSettings does nothing on Windows.
-func OpenScreenCaptureSettings() {}
-
-// CaptureScreen takes a picture of r at the screen's full resolution.
-func CaptureScreen(r application.Rect) (Image, error) {
+// CaptureScreen takes a picture of r, in physical pixels.
+func CaptureScreen(p Rect) (Image, error) {
 	// Let the screen drop windows that were just hidden before taking it.
 	procDwmFlush.Call()
-	p := application.DipToPhysicalRect(r)
 	if p.Width <= 0 || p.Height <= 0 {
 		return Image{}, errors.New("截取屏幕失败")
 	}
-	pixels, err := capturePixels(p)
+	pixels, err := capturePixelsInHelper(p)
 	if err != nil {
 		return Image{}, err
 	}

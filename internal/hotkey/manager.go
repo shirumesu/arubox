@@ -9,8 +9,8 @@ import (
 	"sync"
 )
 
-// Registrar binds accelerators with the operating system. Wails'
-// GlobalShortcutManager satisfies it.
+// Registrar binds accelerators with the operating system. System
+// satisfies it.
 type Registrar interface {
 	Register(accelerator string, callback func()) error
 	Unregister(accelerator string) error

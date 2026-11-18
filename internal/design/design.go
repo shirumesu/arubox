@@ -1,16 +1,8 @@
-// Package design reads the design tokens of frontend/src/index.css, which
-// define colour, radius and type once for the web pages and for what is
-// drawn natively.
+// Package design holds the design tokens every surface is drawn with:
+// colour, radius and type, for the light and the dark theme.
 package design
 
-import (
-	"errors"
-	"fmt"
-	"math"
-	"regexp"
-	"strconv"
-	"strings"
-)
+import "math"
 
 // Color is a non-linear sRGB colour with straight alpha, each part 0 to 1.
 type Color struct {
@@ -23,94 +15,100 @@ func (c Color) WithAlpha(a float64) Color {
 	return c
 }
 
-// Tokens are the values natively drawn surfaces use.
-type Tokens struct {
-	// Radius is the corner radius of cards, in pixels at 96 DPI.
-	Radius float64
-	// Primary is the accent colour of the dark theme, which natively drawn
-	// surfaces over the wallpaper use.
-	Primary Color
-	// Fonts are the font families, in order of preference.
-	Fonts []string
+// Mix returns the colour t of the way from c to o.
+func (c Color) Mix(o Color, t float64) Color {
+	return Color{
+		R: c.R + (o.R-c.R)*t,
+		G: c.G + (o.G-c.G)*t,
+		B: c.B + (o.B-c.B)*t,
+		A: c.A + (o.A-c.A)*t,
+	}
 }
 
-var (
-	radiusRe  = regexp.MustCompile(`--radius:\s*([0-9.]+)rem;`)
-	primaryRe = regexp.MustCompile(`--primary:\s*oklch\(([^)]*)\);`)
-	fontRe    = regexp.MustCompile(`--font-sans:([^;]*);`)
-)
-
-// Parse reads the tokens out of the stylesheet.
-func Parse(css []byte) (Tokens, error) {
-	s := string(css)
-	var t Tokens
-	m := radiusRe.FindStringSubmatch(s)
-	if m == nil {
-		return t, errors.New("design: no --radius")
-	}
-	rem, err := strconv.ParseFloat(m[1], 64)
-	if err != nil {
-		return t, fmt.Errorf("design: --radius: %w", err)
-	}
-	t.Radius = rem * 16
-
-	dark := strings.Index(s, "prefers-color-scheme: dark)")
-	if dark < 0 {
-		return t, errors.New("design: no dark theme")
-	}
-	m = primaryRe.FindStringSubmatch(s[dark:])
-	if m == nil {
-		return t, errors.New("design: no dark --primary")
-	}
-	if t.Primary, err = parseOKLCH(m[1]); err != nil {
-		return t, err
-	}
-
-	m = fontRe.FindStringSubmatch(s)
-	if m == nil {
-		return t, errors.New("design: no --font-sans")
-	}
-	for f := range strings.SplitSeq(m[1], ",") {
-		f = strings.Trim(strings.TrimSpace(f), `"`)
-		if f != "" && f != "sans-serif" && !strings.HasPrefix(f, "-") && f != "BlinkMacSystemFont" {
-			t.Fonts = append(t.Fonts, f)
-		}
-	}
-	return t, nil
+// Palette is one theme's colours.
+type Palette struct {
+	Background, Foreground         Color
+	Card, CardForeground           Color
+	Popover, PopoverForeground     Color
+	Primary, PrimaryForeground     Color
+	Secondary, SecondaryForeground Color
+	Muted, MutedForeground         Color
+	Accent, AccentForeground       Color
+	Destructive                    Color
+	Border, Input, Ring            Color
+	Sidebar, SidebarForeground     Color
+	SidebarAccent                  Color
+	SidebarAccentForeground        Color
+	SidebarBorder                  Color
 }
 
-// parseOKLCH reads "L C H" or "L C H / A" as in CSS.
-func parseOKLCH(v string) (Color, error) {
-	alpha := 1.0
-	if body, a, ok := strings.Cut(v, "/"); ok {
-		v = body
-		pa, err := parsePart(strings.TrimSpace(a))
-		if err != nil {
-			return Color{}, err
-		}
-		alpha = pa
-	}
-	f := strings.Fields(v)
-	if len(f) != 3 {
-		return Color{}, fmt.Errorf("design: bad oklch(%s)", v)
-	}
-	var n [3]float64
-	for i, p := range f {
-		x, err := parsePart(p)
-		if err != nil {
-			return Color{}, err
-		}
-		n[i] = x
-	}
-	return oklch(n[0], n[1], n[2], alpha), nil
+// Radius is the corner radius of cards, in pixels at 96 DPI. Smaller
+// controls use Radius-4 and Radius-2.
+const Radius = 10.0
+
+// Fonts are the font families, in order of preference.
+var Fonts = []string{"Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei"}
+
+// Light is the light theme.
+var Light = Palette{
+	Background:              oklch(0.985, 0.002, 60, 1),
+	Foreground:              oklch(0.2, 0.01, 50, 1),
+	Card:                    oklch(1, 0, 0, 1),
+	CardForeground:          oklch(0.2, 0.01, 50, 1),
+	Popover:                 oklch(1, 0, 0, 1),
+	PopoverForeground:       oklch(0.2, 0.01, 50, 1),
+	Primary:                 oklch(0.68, 0.17, 38, 1),
+	PrimaryForeground:       oklch(0.99, 0, 0, 1),
+	Secondary:               oklch(0.955, 0.006, 60, 1),
+	SecondaryForeground:     oklch(0.25, 0.01, 50, 1),
+	Muted:                   oklch(0.955, 0.006, 60, 1),
+	MutedForeground:         oklch(0.52, 0.012, 50, 1),
+	Accent:                  oklch(0.95, 0.02, 50, 1),
+	AccentForeground:        oklch(0.25, 0.01, 50, 1),
+	Destructive:             oklch(0.58, 0.22, 27, 1),
+	Border:                  oklch(0.91, 0.006, 60, 1),
+	Input:                   oklch(0.89, 0.006, 60, 1),
+	Ring:                    oklch(0.68, 0.17, 38, 0.5),
+	Sidebar:                 oklch(0.965, 0.004, 60, 1),
+	SidebarForeground:       oklch(0.3, 0.01, 50, 1),
+	SidebarAccent:           oklch(0.92, 0.008, 60, 1),
+	SidebarAccentForeground: oklch(0.2, 0.01, 50, 1),
+	SidebarBorder:           oklch(0.91, 0.006, 60, 1),
 }
 
-func parsePart(p string) (float64, error) {
-	if pct, ok := strings.CutSuffix(p, "%"); ok {
-		x, err := strconv.ParseFloat(pct, 64)
-		return x / 100, err
+// Dark is the dark theme.
+var Dark = Palette{
+	Background:              oklch(0.19, 0.004, 50, 1),
+	Foreground:              oklch(0.95, 0.004, 60, 1),
+	Card:                    oklch(0.23, 0.005, 50, 1),
+	CardForeground:          oklch(0.95, 0.004, 60, 1),
+	Popover:                 oklch(0.23, 0.005, 50, 1),
+	PopoverForeground:       oklch(0.95, 0.004, 60, 1),
+	Primary:                 oklch(0.72, 0.16, 40, 1),
+	PrimaryForeground:       oklch(0.18, 0.01, 50, 1),
+	Secondary:               oklch(0.27, 0.006, 50, 1),
+	SecondaryForeground:     oklch(0.95, 0.004, 60, 1),
+	Muted:                   oklch(0.27, 0.006, 50, 1),
+	MutedForeground:         oklch(0.68, 0.01, 55, 1),
+	Accent:                  oklch(0.3, 0.02, 45, 1),
+	AccentForeground:        oklch(0.95, 0.004, 60, 1),
+	Destructive:             oklch(0.68, 0.19, 25, 1),
+	Border:                  oklch(1, 0, 0, 0.09),
+	Input:                   oklch(1, 0, 0, 0.14),
+	Ring:                    oklch(0.72, 0.16, 40, 0.5),
+	Sidebar:                 oklch(0.165, 0.004, 50, 1),
+	SidebarForeground:       oklch(0.85, 0.006, 60, 1),
+	SidebarAccent:           oklch(0.26, 0.006, 50, 1),
+	SidebarAccentForeground: oklch(0.97, 0.004, 60, 1),
+	SidebarBorder:           oklch(1, 0, 0, 0.07),
+}
+
+// Theme returns the palette for dark or light.
+func Theme(dark bool) *Palette {
+	if dark {
+		return &Dark
 	}
-	return strconv.ParseFloat(p, 64)
+	return &Light
 }
 
 // oklch converts to sRGB, by way of OKLab and linear sRGB.

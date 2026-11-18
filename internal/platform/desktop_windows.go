@@ -135,7 +135,11 @@ const (
 	mdtEffectiveDpi = 0
 	timerAnimate    = 1
 	timerReattach   = 2
-	frameMS         = 15
+	timerSleep      = 3
+	// sleepAfterMS is how long the layer stays still before its pictures,
+	// a full-screen bitmap per display, are freed.
+	sleepAfterMS = 3000
+	frameMS      = 15
 )
 
 type rect struct{ Left, Top, Right, Bottom int32 }
@@ -254,6 +258,9 @@ type DesktopHandler interface {
 	DropAt(x, y float64, internal bool) DropTarget
 	// Dropped reports a drop that was done.
 	Dropped(x, y float64, t DropTarget)
+	// DropLeft reports a drag that left the point last given to DropAt
+	// without dropping: it went off the surface or was given up.
+	DropLeft()
 	// ShellChanged reports that watched folders changed; renames pairs
 	// old and new parsing names of items renamed.
 	ShellChanged(renames [][2]string)
@@ -634,6 +641,9 @@ func (d *Desktop) paint() {
 		// Whole pixels, so the cleared area and the copied area agree.
 		dirty = snapOut(dirty)
 		s.dirty = Box{}
+		if err := s.canvas.wake(); err != nil {
+			return
+		}
 		for range 2 {
 			s.canvas.begin(dirty)
 			d.handler.Paint(s.canvas, dirty)
@@ -651,6 +661,21 @@ func (d *Desktop) paint() {
 			Right: int32(dirty.X + dirty.Width - s.monitor.Bounds.X), Bottom: int32(dirty.Y + dirty.Height - s.monitor.Bounds.Y),
 		})
 		s.full = true
+	}
+	procSetTimer.Call(d.host, timerSleep, sleepAfterMS, 0)
+}
+
+// sleep frees the surfaces' pictures while the layer is still. The windows
+// keep showing them; the next paint draws only what changed into a blank
+// picture and copies only that part.
+func (d *Desktop) sleep() {
+	if d.animating || d.dragging || d.edit != nil || d.menu != nil {
+		procSetTimer.Call(d.host, timerSleep, sleepAfterMS, 0)
+		return
+	}
+	procKillTimer.Call(d.host, timerSleep)
+	for _, s := range d.surfaces {
+		s.canvas.sleep()
 	}
 }
 
@@ -678,18 +703,7 @@ func (d *Desktop) present(s *surface, dirty *rect) {
 		size := struct{ CX, CY int32 }{int32(s.canvas.width), int32(s.canvas.height)}
 		src := point{}
 		blend := [4]byte{0, 0, d.alpha, acSrcAlpha}
-		info := struct {
-			Size  uint32
-			Dst   uintptr
-			PtDst uintptr
-			PSize uintptr
-			Src   uintptr
-			PtSrc uintptr
-			Key   uint32
-			Blend uintptr
-			Flags uint32
-			Dirty uintptr
-		}{
+		info := updateLayeredInfo{
 			PSize: uintptr(unsafe.Pointer(&size)), Src: dc, PtSrc: uintptr(unsafe.Pointer(&src)),
 			Blend: uintptr(unsafe.Pointer(&blend)), Flags: ulwAlpha, Dirty: uintptr(unsafe.Pointer(dirty)),
 		}
@@ -702,11 +716,37 @@ func (d *Desktop) present(s *surface, dirty *rect) {
 // SetAlpha fades the whole layer, without drawing it again.
 func (d *Desktop) SetAlpha(a byte) {
 	d.alpha = a
+	woken := false
+	for _, s := range d.surfaces {
+		if s.full && s.canvas.asleep() {
+			// A whole copy needs a whole picture, so a sleeping canvas is
+			// drawn again first.
+			s.dirty = s.monitor.Bounds
+			woken = true
+		}
+	}
+	if woken {
+		d.paint()
+	}
 	for _, s := range d.surfaces {
 		if s.full {
 			d.present(s, nil)
 		}
 	}
+}
+
+// updateLayeredInfo is UPDATELAYEREDWINDOWINFO.
+type updateLayeredInfo struct {
+	Size  uint32
+	Dst   uintptr
+	PtDst uintptr
+	PSize uintptr
+	Src   uintptr
+	PtSrc uintptr
+	Key   uint32
+	Blend uintptr
+	Flags uint32
+	Dirty uintptr
 }
 
 // Animate turns the frame ticks on or off.
@@ -946,6 +986,9 @@ func hostWndProc(hwnd, m, w, l uintptr) uintptr {
 		return 0
 	case m == wmTimer && w == timerAnimate:
 		d.handler.Tick()
+		return 0
+	case m == wmTimer && w == timerSleep:
+		d.sleep()
 		return 0
 	case m == wmTimer && w == timerReattach:
 		procKillTimer.Call(hwnd, timerReattach)

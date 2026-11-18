@@ -34,41 +34,67 @@ func (v *view) Paint(c *platform.Canvas, dirty platform.Box) {
 	if v.hidden {
 		return
 	}
-	var expanded *cell
+	expanded := v.expandedCell()
 	for _, cl := range v.loose {
-		if intersects(cl.rect, dirty) {
-			if v.drawCell(c, cl, false) {
-				expanded = cl
-			}
+		if cl != expanded && intersects(cl.rect, dirty) {
+			v.drawCell(c, cl, false)
 		}
 	}
 	for _, g := range v.boxes {
 		if intersects(g.rect, dirty) {
-			if e := v.drawBox(c, g, dirty); e != nil {
-				expanded = e
-			}
+			v.drawBox(c, g, dirty, expanded)
 		}
 	}
-	// The selected item's whole name goes over its neighbours.
-	if expanded != nil {
-		if expanded.box != nil {
-			c.PushClip(expanded.box.content)
-		}
-		v.drawCell(c, expanded, true)
-		if expanded.box != nil {
+	// The selected item's whole name goes over its neighbours, so it is
+	// drawn last, and only then, wherever its name reaches.
+	if expanded != nil && intersects(v.cellExtent(expanded), dirty) {
+		if g := expanded.box; g == nil {
+			v.drawCell(c, expanded, true)
+		} else if g.rect.Height > g.m.title+1 && intersects(expanded.rect, g.content) {
+			c.PushClip(g.content)
+			v.drawCell(c, expanded, true)
 			c.PopClip()
 		}
 	}
 	if v.band.Width > 0 && v.band.Height > 0 {
-		c.FillRect(v.band, v.tokens.Primary.WithAlpha(0.16))
-		c.StrokeRoundRect(platform.Box{X: v.band.X + 0.5, Y: v.band.Y + 0.5, Width: v.band.Width - 1, Height: v.band.Height - 1}, 0, 1, v.tokens.Primary.WithAlpha(0.85))
+		c.FillRect(v.band, design.Dark.Primary.WithAlpha(0.16))
+		c.StrokeRoundRect(platform.Box{X: v.band.X + 0.5, Y: v.band.Y + 0.5, Width: v.band.Width - 1, Height: v.band.Height - 1}, 0, 1, design.Dark.Primary.WithAlpha(0.85))
 	}
 }
 
-// expandsName reports whether a cell shows its whole name: the only
-// selected item does, as on File Explorer's desktop.
-func (v *view) expandsName(cl *cell) bool {
-	return len(v.selected) == 1 && v.selected[cl.item.Key] && v.selBox == boxID(cl) && v.editing == nil
+// expandedCell returns the item that shows its whole name, if its name is
+// longer than its cell shows: the only selected item does, as on File
+// Explorer's desktop.
+func (v *view) expandedCell() *cell {
+	if len(v.selected) != 1 || v.editing != nil {
+		return nil
+	}
+	for _, cl := range v.containerCells(v.selBox) {
+		if !v.selected[cl.item.Key] {
+			continue
+		}
+		m := cl.m
+		label := v.text(cl.item.Name, m.labelW, m.font, m.line, 2, false)
+		full := v.text(cl.item.Name, m.labelW, m.font, m.line, 8, false)
+		if label != nil && full != nil && full.Height > label.Height+0.5 {
+			return cl
+		}
+		return nil
+	}
+	return nil
+}
+
+// cellExtent is the space an item takes with its whole name showing,
+// which reaches past its cell for a long name.
+func (v *view) cellExtent(cl *cell) platform.Box {
+	m, r := cl.m, cl.rect
+	full := v.text(cl.item.Name, m.labelW, m.font, m.line, 8, false)
+	if full == nil {
+		return r
+	}
+	labelY := r.Y + m.iconTop + m.icon + m.labelGap
+	r.Height = math.Max(r.Height, labelY+full.Height+m.pad/2-r.Y)
+	return r
 }
 
 func boxID(cl *cell) string {
@@ -78,13 +104,13 @@ func boxID(cl *cell) string {
 	return cl.box.box.ID
 }
 
-// drawCell draws an item. A selected item whose name is shorter in its
-// cell than in full is drawn again, expanded, over the others; drawCell
-// reports when it needs that.
-func (v *view) drawCell(c *platform.Canvas, cl *cell, expanded bool) bool {
+// drawCell draws an item, with its whole name when expanded.
+func (v *view) drawCell(c *platform.Canvas, cl *cell, expanded bool) {
 	m, r := cl.m, cl.rect
 	selected := v.selected[cl.item.Key] && v.selBox == boxID(cl)
 	hovered := v.hover.cell != nil && v.hover.cell.item.Key == cl.item.Key && boxID(v.hover.cell) == boxID(cl)
+	// An item a drag would drop onto shows as hovered.
+	hovered = hovered || v.mark != nil && v.mark.onto == cl.item.Key && v.mark.box == boxID(cl)
 	iconY := r.Y + m.iconTop
 	labelY := iconY + m.icon + m.labelGap
 	lines := 2
@@ -92,12 +118,6 @@ func (v *view) drawCell(c *platform.Canvas, cl *cell, expanded bool) bool {
 		lines = 8
 	}
 	label := v.text(cl.item.Name, m.labelW, m.font, m.line, lines, false)
-	full := label
-	wantsExpand := false
-	if !expanded && v.expandsName(cl) {
-		full = v.text(cl.item.Name, m.labelW, m.font, m.line, 8, false)
-		wantsExpand = full != nil && label != nil && full.Height > label.Height+0.5
-	}
 	labelH := m.line
 	if label != nil {
 		labelH = label.Height
@@ -106,8 +126,8 @@ func (v *view) drawCell(c *platform.Canvas, cl *cell, expanded bool) bool {
 	radius := math.Max(2, m.radius/2)
 	switch {
 	case selected:
-		c.FillRoundRect(hl, radius, v.tokens.Primary.WithAlpha(0.32))
-		c.StrokeRoundRect(platform.Box{X: hl.X + 0.5, Y: hl.Y + 0.5, Width: hl.Width - 1, Height: hl.Height - 1}, radius, 1, v.tokens.Primary.WithAlpha(0.75))
+		c.FillRoundRect(hl, radius, design.Dark.Primary.WithAlpha(0.32))
+		c.StrokeRoundRect(platform.Box{X: hl.X + 0.5, Y: hl.Y + 0.5, Width: hl.Width - 1, Height: hl.Height - 1}, radius, 1, design.Dark.Primary.WithAlpha(0.75))
 	case hovered:
 		c.FillRoundRect(hl, radius, white.WithAlpha(0.12))
 	}
@@ -122,12 +142,11 @@ func (v *view) drawCell(c *platform.Canvas, cl *cell, expanded bool) bool {
 		c.DrawText(label, x+1, labelY+1, shadow)
 		c.DrawText(label, x, labelY, white)
 	}
-	return wantsExpand
 }
 
-// drawBox draws a box and the items in it, and returns an item of it to be
-// drawn again expanded.
-func (v *view) drawBox(c *platform.Canvas, g *boxGeo, dirty platform.Box) *cell {
+// drawBox draws a box and the items in it but skip, which Paint draws
+// expanded over everything.
+func (v *view) drawBox(c *platform.Canvas, g *boxGeo, dirty platform.Box, skip *cell) {
 	m, b := g.m, g.box
 	bg := boxColors[b.Color]
 	bg.A = float64(v.settings.Opacity) / 100
@@ -135,7 +154,7 @@ func (v *view) drawBox(c *platform.Canvas, g *boxGeo, dirty platform.Box) *cell 
 	border, width := white.WithAlpha(0.1), 1.0
 	switch {
 	case v.dropBox == b.ID:
-		border, width = v.tokens.Primary.WithAlpha(0.9), math.Round(2*m.scale)
+		border, width = design.Dark.Primary.WithAlpha(0.9), math.Round(2*m.scale)
 	case v.hover.box == g:
 		border = white.WithAlpha(0.2)
 	}
@@ -157,17 +176,17 @@ func (v *view) drawBox(c *platform.Canvas, g *boxGeo, dirty platform.Box) *cell 
 		c.DrawText(t, left, y, white.WithAlpha(0.95))
 	}
 	if g.rect.Height <= m.title+1 {
-		return nil
+		return
 	}
 	c.FillRect(platform.Box{X: g.rect.X + m.pad, Y: g.title.Y + m.title - 1, Width: g.rect.Width - 2*m.pad, Height: 1}, white.WithAlpha(0.08))
-	var expand *cell
 	c.PushClip(g.content)
 	for _, cl := range g.cells {
-		if intersects(cl.rect, g.content) && intersects(cl.rect, dirty) {
-			if v.drawCell(c, cl, false) {
-				expand = cl
-			}
+		if cl != skip && intersects(cl.rect, g.content) && intersects(cl.rect, dirty) {
+			v.drawCell(c, cl, false)
 		}
+	}
+	if mk := v.mark; mk != nil && mk.box == b.ID && mk.onto == "" && mk.rect.Width > 0 {
+		c.FillRoundRect(mk.rect, mk.rect.Width/2, design.Dark.Primary)
 	}
 	if len(g.cells) == 0 {
 		hint := "把图标拖到这里"
@@ -186,5 +205,4 @@ func (v *view) drawBox(c *platform.Canvas, g *boxGeo, dirty platform.Box) *cell 
 		y := g.content.Y + (track-h)*g.scroll/(g.contentH-visible)
 		c.FillRoundRect(platform.Box{X: g.rect.X + g.rect.Width - m.scrollWidth - m.pad/2, Y: y, Width: m.scrollWidth, Height: h}, m.scrollWidth/2, white.WithAlpha(0.35))
 	}
-	return expand
 }

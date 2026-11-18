@@ -41,7 +41,7 @@ func (v *view) metrics(scale float64) metrics {
 		title:       s(32),
 		pad:         s(6),
 		margin:      s(10),
-		radius:      v.tokens.Radius * scale,
+		radius:      design.Radius * scale,
 		edge:        s(6),
 		reach:       s(12),
 		gap:         s(8),
@@ -96,7 +96,6 @@ type labelKey struct {
 type view struct {
 	m        *Module
 	d        *platform.Desktop
-	tokens   design.Tokens
 	settings Settings
 	layout   Layout
 	monitors []platform.DesktopMonitor
@@ -128,7 +127,12 @@ type view struct {
 	editing  *editing
 	pending  *placement
 	dropBox  string
-	lastX    float64 // where the pointer last was
+	mark     *dropMark   // where a drag over the layer would drop
+	spring   *springWait // a drag resting over a rolled-up box
+	sprung   string      // a rolled-up box a drag opened
+	expanded itemRef     // the item showing its whole name, as last drawn
+	dragging bool        // the layer's own drag is under way
+	lastX    float64     // where the pointer last was
 	lastY    float64
 
 	refreshQueued bool
@@ -149,6 +153,7 @@ const animTime = 160 * time.Millisecond
 type placement struct {
 	box   string
 	x, y  float64
+	mark  *dropMark // the place among the box's items, if it has one
 	until time.Time
 }
 
@@ -161,7 +166,7 @@ type editing struct {
 
 func startView(m *Module, s stored) (*view, error) {
 	v := &view{
-		m: m, tokens: m.tokens, settings: s.Settings, layout: s.Layout,
+		m: m, settings: s.Settings, layout: s.Layout,
 		items: map[string]platform.ShellItem{}, portals: map[string]*portal{},
 		pixels: map[iconKey]platform.Image{}, bitmaps: map[*platform.Canvas]map[iconKey]*platform.Bitmap{},
 		loading: map[iconKey]bool{}, icons: make(chan iconKey, 4096), texts: map[labelKey]*platform.TextLayout{},
@@ -311,7 +316,7 @@ func (v *view) loadPortal(p *portal) {
 func (v *view) placeNew(keys []string) {
 	if p := v.pending; p != nil && time.Now().Before(p.until) {
 		if b := v.layout.box(p.box); b != nil && b.Folder == "" {
-			v.layout.put(b, keys, v.insertIndex(v.geoOf(b.ID), p.x, p.y))
+			v.putAt(b, keys, p.mark)
 			v.save()
 			return
 		}
@@ -453,7 +458,9 @@ func (v *view) layoutBox(g *boxGeo) {
 	}
 	g.content = platform.Box{X: g.full.X + m.pad, Y: g.full.Y + m.title, Width: g.full.Width - 2*m.pad, Height: g.rect.Height - m.title - m.pad}
 	items := v.boxItems(g.box)
-	cols := max(1, int(g.content.Width/m.cellW))
+	// A box sized on the grid is a whole number of cells wide, give or
+	// take rounding.
+	cols := max(1, int(g.content.Width/m.cellW+1e-6))
 	cw := g.content.Width / float64(cols)
 	rows := (len(items) + cols - 1) / cols
 	g.contentH = float64(rows) * m.cellH
@@ -655,21 +662,6 @@ func (v *view) geoOf(boxID string) *boxGeo {
 	return nil
 }
 
-// insertIndex is where items dropped at a point go among a box's items.
-// It is -1, the end, for a sorted box.
-func (v *view) insertIndex(g *boxGeo, x, y float64) int {
-	if g == nil || g.box.Sort != "" {
-		return -1
-	}
-	for _, c := range g.cells {
-		r := c.rect
-		if y < r.Y || (y < r.Y+r.Height && x < r.X+r.Width/2) {
-			return slices.Index(g.box.Items, c.item.Key)
-		}
-	}
-	return -1
-}
-
 func (v *view) animHeight(a *anim) float64 {
 	t := math.Min(1, float64(time.Since(a.start))/float64(animTime))
 	t = 1 - (1-t)*(1-t)*(1-t) // ease out
@@ -707,6 +699,37 @@ func (v *view) Tick() {
 func (v *view) invalidate(b platform.Box) {
 	if v.d != nil {
 		v.d.Invalidate(platform.Box{X: b.X - 2, Y: b.Y - 2, Width: b.Width + 4, Height: b.Height + 4})
+		v.followExpanded()
+	}
+}
+
+// invalidateCell redraws an item, with all the space its whole name may
+// take.
+func (v *view) invalidateCell(c *cell) { v.invalidate(v.cellExtent(c)) }
+
+// itemRef names an item of a box, or a loose one for box "".
+type itemRef struct{ box, key string }
+
+// followExpanded redraws the items whose whole name starts or stops
+// showing. That depends on the whole selection and on editing, not only on
+// the item, and the name reaches past the item's cell, so every redraw
+// checks it.
+func (v *view) followExpanded() {
+	var now itemRef
+	if c := v.expandedCell(); c != nil {
+		now = itemRef{boxID(c), c.item.Key}
+	}
+	if now == v.expanded {
+		return
+	}
+	old := v.expanded
+	v.expanded = now
+	for _, r := range []itemRef{old, now} {
+		for _, c := range v.containerCells(r.box) {
+			if r.key != "" && c.item.Key == r.key {
+				v.invalidateCell(c)
+			}
+		}
 	}
 }
 
@@ -794,7 +817,7 @@ func (v *view) dropIcons() {
 func (v *view) invalidateItem(key string) {
 	for _, c := range v.allCells() {
 		if c.item.Key == key {
-			v.invalidate(c.rect)
+			v.invalidateCell(c)
 		}
 	}
 }
@@ -820,7 +843,7 @@ func (v *view) text(s string, width float64, size, line float64, lines int, bold
 		}
 		clear(v.texts)
 	}
-	t := platform.NewTextLayout(s, platform.Font{Family: v.tokens.Fonts[0], Size: size, LineHeight: line, Bold: bold, Center: true, Lines: lines}, width)
+	t := platform.NewTextLayout(s, platform.Font{Family: design.Fonts[0], Size: size, LineHeight: line, Bold: bold, Center: true, Lines: lines}, width)
 	v.texts[k] = t
 	return t
 }
@@ -850,7 +873,7 @@ func (v *view) containerCells(boxID string) []*cell {
 func (v *view) clearSelection() {
 	for _, c := range v.containerCells(v.selBox) {
 		if v.selected[c.item.Key] {
-			v.invalidate(c.rect)
+			v.invalidateCell(c)
 		}
 	}
 	clear(v.selected)

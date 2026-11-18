@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
-	"runtime"
 	"runtime/debug"
 	"strings"
 
@@ -22,8 +21,7 @@ import (
 // its pixels as they are, so that neither side copies them; replies go as
 // gob. Releasing the model ends the process, which gives back all of its
 // memory: ONNX Runtime keeps tens of megabytes after its
-// environment is released, the macOS allocator keeps the large blocks a run
-// frees, and Windows cannot delete a DLL that is loaded. A crash in ONNX
+// environment is released, and Windows cannot delete a DLL that is loaded. A crash in ONNX
 // Runtime ends the worker, not arubox.
 const workerArg = "--ocr-worker"
 
@@ -84,20 +82,6 @@ func serve(dir string, in io.Reader, out io.Writer) error {
 	}
 }
 
-// workerEnv is the worker's environment. On macOS it keeps ONNX Runtime's
-// telemetry from starting, and turns off the allocator's cache of freed
-// large blocks: a run allocates and frees a few hundred megabytes, and the
-// cache would keep them while the worker idles. MallocLargeCache is read by
-// libmalloc but not documented; should it stop working, the worker holds
-// more memory while it runs, and still gives it all back when it ends.
-func workerEnv() []string {
-	env := os.Environ()
-	if runtime.GOOS == "darwin" {
-		env = append(env, "ORT_DISABLE_TELEMETRY=1", "MallocLargeCache=0")
-	}
-	return env
-}
-
 // worker is a running worker process.
 type worker struct {
 	cmd   *exec.Cmd
@@ -113,7 +97,7 @@ func startWorker(dir string, log *slog.Logger) (*worker, error) {
 		return nil, err
 	}
 	cmd := exec.Command(exe, workerArg, dir)
-	cmd.Env = workerEnv()
+	cmd.Env = os.Environ()
 	cmd.Stderr = logWriter{log}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {

@@ -96,7 +96,7 @@ func install(sid string) error {
 		StartType:    mgr.StartAutomatic,
 		ErrorControl: mgr.ErrorNormal,
 		DisplayName:  "arubox 文件索引",
-		Description:  "读取文件表并跟随变更，为 arubox 的启动器提供文件搜索。",
+		Description:  "为 arubox 启动器提供即时的文件搜索。",
 	}
 	if exists {
 		config.BinaryPathName = syscall.EscapeArg(target) + " " + flagService + " " + sid

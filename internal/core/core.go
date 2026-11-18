@@ -3,18 +3,15 @@
 package core
 
 import (
+	"errors"
 	"fmt"
-	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime/debug"
-
-	"github.com/wailsapp/wails/v3/pkg/application"
-	"github.com/wailsapp/wails/v3/pkg/events"
+	"time"
 
 	"github.com/shirumesu/arubox/internal/config"
-	"github.com/shirumesu/arubox/internal/design"
 	"github.com/shirumesu/arubox/internal/hotkey"
 	"github.com/shirumesu/arubox/internal/logging"
 	"github.com/shirumesu/arubox/internal/module"
@@ -23,6 +20,7 @@ import (
 	"github.com/shirumesu/arubox/internal/modules/screenshot"
 	"github.com/shirumesu/arubox/internal/modules/translate"
 	"github.com/shirumesu/arubox/internal/ocr"
+	"github.com/shirumesu/arubox/internal/ui"
 	"github.com/shirumesu/arubox/internal/update"
 )
 
@@ -34,32 +32,37 @@ const (
 	bundleID = "com.shirumesu.arubox"
 	// coreOwner owns the hotkeys of the main program itself.
 	coreOwner = "core"
-	// gcPercent lets the heap grow only a quarter past what is live before
+	// gcPercent lets the heap grow only a tenth past what is live before
 	// it is collected, not double. Most of what is live is the file index,
 	// which holds no pointers, so a collection costs little however large
-	// it is, and doubling it would keep tens of megabytes unused.
-	gcPercent = 25
+	// it is, and more room would keep megabytes unused.
+	gcPercent = 10
+	// settleAfter is when start-up is over: loading the file index's
+	// snapshot, listing volumes and reading the app list leave tens of
+	// megabytes of garbage, which Go would hand back over minutes.
+	settleAfter = 20 * time.Second
 )
 
-// Core holds the running program.
+// Core holds the running program. Its fields are set before the UI thread
+// starts and not changed after.
 type Core struct {
-	app       *application.App
 	log       *slog.Logger
 	logDir    string
+	store     *config.Store
 	hotkeys   *hotkey.Manager
 	modules   *module.Registry
-	dashboard *dashboard
 	updater   *update.Updater
+	reader    *ocr.Engine
+	dashboard *dashboard
+	tray      *ui.Tray
+	// trayUpdate is the tray menu's update item label, "" while none is on
+	// offer. Touched on the UI thread only.
+	trayUpdate string
 }
 
-// Run starts the program and blocks until it quits. assets is the built
-// frontend and css its stylesheet, which holds the design tokens.
-func Run(assets fs.FS, css []byte) error {
+// Run starts the program and blocks until it quits.
+func Run() error {
 	debug.SetGCPercent(gcPercent)
-	tokens, err := design.Parse(css)
-	if err != nil {
-		return err
-	}
 	logDir, err := logDirectory()
 	if err != nil {
 		return err
@@ -80,7 +83,6 @@ func Run(assets fs.FS, css []byte) error {
 	if err != nil {
 		return err
 	}
-
 	dataDir, err := dataDirectory()
 	if err != nil {
 		return err
@@ -89,72 +91,49 @@ func Run(assets fs.FS, css []byte) error {
 	if err != nil {
 		return err
 	}
-	c := &Core{log: log, logDir: logDir, updater: updater}
-	reader := ocr.New(store, log, filepath.Join(dataDir, "ocr"))
-	translator := translate.New(store, log, reader)
+	c := &Core{log: log, logDir: logDir, store: store, updater: updater}
+	c.reader = ocr.New(store, log, filepath.Join(dataDir, "ocr"))
+	translator := translate.New(store, log, c.reader)
 	modules := []module.Module{
 		translator,
 		launcher.New(store, log, launcherTranslator{translator}),
-		screenshot.New(store, log, reader, screenshotTranslator{translator}),
-		desktop.New(store, log, tokens),
+		screenshot.New(store, log, c.reader, screenshotTranslator{translator}),
+		desktop.New(store, log),
 	}
-	services := []application.Service{
-		application.NewService(&DashboardService{core: c}),
-		updater.Service(),
-		application.NewService(ocr.NewService(reader)),
-	}
-	for _, m := range modules {
-		services = append(services, m.Services()...)
-	}
-	c.app = application.New(application.Options{
-		Name:        appName,
-		Description: "个人工具箱",
-		// Wails logs every asset request at info level; keep only problems.
-		Logger:   logging.New(logOut, slog.LevelWarn),
-		Services: services,
-		Assets: application.AssetOptions{
-			Handler: application.AssetFileServerFS(assets),
-		},
-		Mac: application.MacOptions{
-			ActivationPolicy: application.ActivationPolicyAccessory,
-		},
-		Windows: application.WindowsOptions{
-			// Every window shows a page of the same site; one process
-			// renders them all, instead of one each.
-			AdditionalBrowserArgs: []string{"--process-per-site"},
-		},
-		SingleInstance: &application.SingleInstanceOptions{
-			UniqueID: bundleID,
-			OnSecondInstanceLaunch: func(application.SecondInstanceData) {
-				c.dashboard.open()
-			},
-		},
-		OnShutdown: c.shutdown,
-	})
-	c.dashboard = &dashboard{core: c}
-	c.hotkeys = hotkey.NewManager(c.app.GlobalShortcut, store, log)
+	c.hotkeys = hotkey.NewManager(hotkey.NewSystem(), store, log)
 	c.hotkeys.Define(coreOwner, appName, []hotkey.Def{
-		{ID: "dashboard", Label: "打开仪表盘", Action: c.dashboard.open},
+		{ID: "dashboard", Label: "打开仪表盘", Action: func() { ui.Post(c.dashboard.open) }},
 	})
-	c.modules = module.NewRegistry(module.Context{App: c.app, Log: log}, store, c.hotkeys, modules)
+	c.modules = module.NewRegistry(module.Context{Log: log}, store, c.hotkeys, modules)
 
-	showUpdate := setupTray(c)
-	c.app.Event.OnApplicationEvent(events.Common.ApplicationStarted, func(*application.ApplicationEvent) {
+	err = ui.Run(ui.Options{ID: bundleID, OnSecondInstance: func() { c.dashboard.open() }}, func() {
+		c.dashboard = newDashboard(c)
+		c.setupTray()
 		c.hotkeys.Activate(coreOwner)
 		c.modules.Start()
-		c.updater.Start(c.app, showUpdate)
+		c.updater.OnChange(func(s update.State) { ui.Post(func() { c.updateTray(s) }) })
+		c.updater.Start(ui.Quit)
+		ui.OnQuit(c.shutdown)
+		time.AfterFunc(settleAfter, debug.FreeOSMemory)
 	})
-
-	if err := c.app.Run(); err != nil {
-		log.Error("application stopped with error", "error", err)
+	if errors.Is(err, ui.ErrRunning) {
+		log.Info("already running; asked it to show the dashboard")
+		return nil
+	}
+	if err != nil {
+		log.Error("stopped with error", "error", err)
 		return err
 	}
 	log.Info("stopped")
 	return nil
 }
 
+// shutdown runs on the UI thread as the program quits.
 func (c *Core) shutdown() {
 	c.updater.Stop()
 	c.modules.Stop()
 	c.hotkeys.UnregisterAll()
+	if c.tray != nil {
+		c.tray.Remove()
+	}
 }

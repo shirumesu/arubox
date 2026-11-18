@@ -9,7 +9,7 @@ import (
 // Mod is a set of modifier keys.
 type Mod uint8
 
-// Modifier keys. Super is Command on macOS and the Windows key on Windows.
+// Modifier keys. Super is the Windows key.
 const (
 	Ctrl Mod = 1 << iota
 	Alt
@@ -17,9 +17,7 @@ const (
 	Super
 )
 
-// modOrder fixes the order modifiers appear in canonical strings. The names
-// are also the ones Wails' accelerator parser understands, and they mean the
-// same physical keys on both platforms.
+// modOrder fixes the order modifiers appear in canonical strings.
 var modOrder = []struct {
 	mod  Mod
 	name string
@@ -30,8 +28,7 @@ var modOrder = []struct {
 	{Super, "Super"},
 }
 
-// keys is the set of keys a global hotkey may use: the ones every supported
-// platform can register. Names follow Wails' accelerator syntax.
+// keys is the set of keys a global hotkey may use.
 var keys = func() map[string]struct{} {
 	set := map[string]struct{}{}
 	add := func(names ...string) {
@@ -61,7 +58,7 @@ type Accelerator struct {
 }
 
 // ErrNeedsModifier is returned for hotkeys that would swallow ordinary typing.
-var ErrNeedsModifier = errors.New("快捷键需要包含 Ctrl、Alt/Option 或 Cmd/Win 中的至少一个（F 键除外）")
+var ErrNeedsModifier = errors.New("快捷键需要包含 Ctrl、Alt 或 Win 中的至少一个（F 键除外）")
 
 // Parse reads an accelerator such as "Ctrl+Alt+k" or "Super+Shift+space".
 // Modifier and key names are case-insensitive.

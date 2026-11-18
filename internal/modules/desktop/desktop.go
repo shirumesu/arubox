@@ -7,14 +7,12 @@ package desktop
 import (
 	"errors"
 	"log/slog"
-	"runtime"
+	"slices"
 	"sync"
 
-	"github.com/wailsapp/wails/v3/pkg/application"
-
-	"github.com/shirumesu/arubox/internal/design"
 	"github.com/shirumesu/arubox/internal/hotkey"
 	"github.com/shirumesu/arubox/internal/module"
+	"github.com/shirumesu/arubox/internal/ui"
 )
 
 const id = "desktop"
@@ -35,10 +33,27 @@ type Settings struct {
 	// on the empty desktop.
 	DoubleClickHide bool `json:"doubleClickHide"`
 	// Snap lines boxes up with the screen's edges and with each other.
-	Snap bool `json:"snap"`
+	Snap SnapMode `json:"snapMode"`
+	// Grid keeps a box's place and size on a grid of icon cells, so it
+	// holds a whole number of icons across and down.
+	Grid bool `json:"grid"`
 	// HoverExpand opens a rolled-up box while the pointer is over it.
 	HoverExpand bool `json:"hoverExpand"`
 }
+
+// SnapMode is how boxes snap to the screen's edges and to each other.
+type SnapMode string
+
+const (
+	// SnapOff leaves boxes where they are dropped.
+	SnapOff SnapMode = "off"
+	// SnapGap keeps a fixed gap between boxes and from the screen's edges.
+	SnapGap SnapMode = "gap"
+	// SnapFlush puts boxes right against each other and the screen's edges.
+	SnapFlush SnapMode = "flush"
+)
+
+var snapModes = []SnapMode{SnapOff, SnapGap, SnapFlush}
 
 // stored is what the module keeps in the settings file.
 type stored struct {
@@ -47,7 +62,7 @@ type stored struct {
 }
 
 func defaultStored() stored {
-	return stored{Settings: Settings{IconSize: 48, Opacity: 45, DoubleClickHide: true, Snap: true, HoverExpand: true}}
+	return stored{Settings: Settings{IconSize: 48, Opacity: 45, DoubleClickHide: true, Snap: SnapGap, HoverExpand: true}}
 }
 
 // Icon sizes and opacities the settings accept.
@@ -60,9 +75,8 @@ const (
 
 // Module is the desktop module.
 type Module struct {
-	store  Store
-	log    *slog.Logger
-	tokens design.Tokens
+	store Store
+	log   *slog.Logger
 
 	mu     sync.Mutex
 	stored stored
@@ -70,13 +84,13 @@ type Module struct {
 }
 
 // New creates the module. It does nothing until enabled.
-func New(store Store, log *slog.Logger, tokens design.Tokens) *Module {
+func New(store Store, log *slog.Logger) *Module {
 	s := defaultStored()
 	if err := store.ModuleSettings(id, &s); err != nil {
 		log.Warn("desktop settings unreadable, using defaults", "error", err)
 		s = defaultStored()
 	}
-	return &Module{store: store, log: log, tokens: tokens, stored: s}
+	return &Module{store: store, log: log, stored: s}
 }
 
 // Info describes the module.
@@ -85,13 +99,8 @@ func (m *Module) Info() module.Info {
 		ID:          id,
 		Name:        "桌面整理",
 		Description: "在桌面空白处拖出一个框来建盒子，把图标归进盒子；也能建文件夹入口，直接在桌面上浏览一个文件夹。文件仍在桌面文件夹里。",
-		Platforms:   []string{"windows"},
+		Icon:        ui.IconDesktop,
 	}
-}
-
-// Services binds the settings page.
-func (m *Module) Services() []application.Service {
-	return []application.Service{application.NewService(&Service{module: m})}
 }
 
 // Hotkeys declares none: boxes are made by dragging on the desktop.
@@ -137,6 +146,9 @@ func (m *Module) setSettings(s Settings) error {
 	if s.Opacity < minOpacity || s.Opacity > maxOpacity {
 		return errors.New("不透明度超出范围")
 	}
+	if !slices.Contains(snapModes, s.Snap) {
+		return errors.New("未知的对齐方式")
+	}
 	m.mu.Lock()
 	next := m.stored
 	next.Settings = s
@@ -153,25 +165,5 @@ func (m *Module) setSettings(s Settings) error {
 	return nil
 }
 
-// Service is what the dashboard's settings page calls.
-type Service struct {
-	module *Module
-}
-
-// SettingsState is everything the settings page shows.
-type SettingsState struct {
-	Settings Settings `json:"settings"`
-	// Platform is the GOOS value.
-	Platform string `json:"platform"`
-}
-
-// State returns the settings.
-func (s *Service) State() SettingsState {
-	return SettingsState{Settings: s.module.currentSettings(), Platform: runtime.GOOS}
-}
-
-// SetSettings saves new settings.
-func (s *Service) SetSettings(settings Settings) (SettingsState, error) {
-	err := s.module.setSettings(settings)
-	return s.State(), err
-}
+// Settings returns the module's dashboard page.
+func (m *Module) Settings() module.Page { return &settingsPage{m: m} }

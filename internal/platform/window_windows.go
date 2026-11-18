@@ -4,26 +4,10 @@ import (
 	"sync"
 	"unsafe"
 
-	"github.com/wailsapp/wails/v3/pkg/application"
 	"golang.org/x/sys/windows"
 )
 
-var (
-	user32           = windows.NewLazySystemDLL("user32.dll")
-	procGetCursorPos = user32.NewProc("GetCursorPos")
-)
-
-// CursorPosition returns the mouse position.
-func CursorPosition() application.Point {
-	var p struct{ X, Y int32 }
-	procGetCursorPos.Call(uintptr(unsafe.Pointer(&p)))
-	return application.PhysicalToDipPoint(application.Point{X: int(p.X), Y: int(p.Y)})
-}
-
-// SetWindowFrame moves and resizes a window in one step.
-func SetWindowFrame(w *application.WebviewWindow, r application.Rect) {
-	w.SetBounds(r)
-}
+var user32 = windows.NewLazySystemDLL("user32.dll")
 
 var (
 	procEnumWindows              = user32.NewProc("EnumWindows")
@@ -48,7 +32,7 @@ const (
 // OnScreenWindows returns the bounds of the normal windows on screen, front
 // to back, leaving out arubox's own, tool windows and windows hidden on
 // other virtual desktops.
-func OnScreenWindows() []application.Rect {
+func OnScreenWindows() []Rect {
 	enumMu.Lock()
 	defer enumMu.Unlock()
 	enumRects = nil
@@ -62,7 +46,7 @@ func OnScreenWindows() []application.Rect {
 // for good, collecting into enumRects under enumMu.
 var (
 	enumMu       sync.Mutex
-	enumRects    []application.Rect
+	enumRects    []Rect
 	enumCallback = windows.NewCallback(collectWindow)
 )
 
@@ -91,9 +75,8 @@ func collectWindow(hwnd, _ uintptr) uintptr {
 	if hr, _, _ := procDwmGetWindowAttribute.Call(hwnd, dwmwaExtendedFrameBounds, uintptr(unsafe.Pointer(&r)), sizeofRect); !succeeded(hr) {
 		procGetWindowRect.Call(hwnd, uintptr(unsafe.Pointer(&r)))
 	}
-	physical := application.Rect{X: int(r.Left), Y: int(r.Top), Width: int(r.Right - r.Left), Height: int(r.Bottom - r.Top)}
-	if dip := application.PhysicalToDipRect(physical); dip.Width >= minWindowSize && dip.Height >= minWindowSize {
-		enumRects = append(enumRects, dip)
+	if w, h := int(r.Right-r.Left), int(r.Bottom-r.Top); w >= minWindowSize && h >= minWindowSize {
+		enumRects = append(enumRects, Rect{X: int(r.Left), Y: int(r.Top), Width: w, Height: h})
 	}
 	return enumWindowsContinue
 }

@@ -88,15 +88,8 @@ func wheelSources(path string) []Source {
 
 const runtimeLicense = "MIT"
 
-// runtimeAssets holds the library for each system and processor it is
-// built for. There is no build for Intel Macs.
+// runtimeAssets holds the library for each processor arubox is built for.
 var runtimeAssets = map[string]asset{
-	"darwin/arm64": {
-		name: "libonnxruntime.1.31.1.dylib", label: "ONNX Runtime 1.31.1", license: runtimeLicense, size: 33037336,
-		download: download{size: 20882125, sha256: "96dd2564b10ea7153ad9c207e7cd8e5917cb3ba521e0e0a62ac03486fdc8d56c",
-			sources: wheelSources("0e/f7/cecc0efeeea83bff2f7789ae1b80f27fa0f0210d6d9d66d1f0031a6b5e47/onnxruntime-1.31.1-cp312-cp312-macosx_14_0_arm64.whl")},
-		member: "onnxruntime/capi/libonnxruntime.1.31.1.dylib",
-	},
 	"windows/amd64": {
 		name: "onnxruntime.dll", label: "ONNX Runtime 1.31.1", license: runtimeLicense, size: 19288376,
 		download: download{size: 14888466, sha256: "ae8a9a351efda685cc59a66226cdefaa37a126c1d66872ca23a2de9425326130",

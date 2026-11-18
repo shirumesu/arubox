@@ -75,9 +75,7 @@ type Runtime struct {
 // Load loads the library at path and creates an environment whose shared
 // thread pool runs an operator on up to threads threads. The threads do not
 // spin waiting for work, so an idle runtime takes no CPU time. Telemetry,
-// which ONNX Runtime sends to Microsoft by default, is turned off; on macOS
-// that also takes ORT_DISABLE_TELEMETRY in the process's environment before
-// Load, as only that keeps it from starting.
+// which ONNX Runtime sends to Microsoft by default, is turned off.
 func Load(path string, threads int) (*Runtime, error) {
 	getAPIBase, err := openLibrary(path)
 	if err != nil {

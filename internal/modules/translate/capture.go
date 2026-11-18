@@ -1,245 +1,150 @@
 package translate
 
 import (
-	"net/http"
-	"strconv"
-	"sync"
-	"time"
-
-	"github.com/wailsapp/wails/v3/pkg/application"
-	"github.com/wailsapp/wails/v3/pkg/events"
+	"fmt"
+	"math"
+	"runtime/debug"
 
 	"github.com/shirumesu/arubox/internal/platform"
+	"github.com/shirumesu/arubox/internal/ui"
 )
 
-// Frame tells the capture page to show a frozen screen.
-type Frame struct {
-	// Seq numbers captures; the page passes it back so a late call about an
-	// older capture is ignored.
-	Seq     int              `json:"seq"`
-	Picture platform.Picture `json:"picture"`
-}
+// minDrag is the smallest side, in DIPs, of an area taken as a selection;
+// anything smaller is a stray click.
+const minDrag = 4.0
 
-const (
-	frameEvent    = "translate:capture"
-	frameEndEvent = "translate:capture-end"
-	// frameRoute is where the capture page loads the frozen screen from, a
-	// strip at a time as /translate/capture?part=N. Wails strips the route
-	// before serving.
-	frameRoute = "/translate/"
-	framePath  = "capture"
-)
-
-func init() {
-	application.RegisterEvent[Frame](frameEvent)
-	application.RegisterEvent[application.Void](frameEndEvent)
-}
-
-// capture is the window laid over the screen under the mouse with a frozen
-// picture of it, where the user drags out the area to translate. The text
-// is read from that picture, so it is what the user saw. Like the popup, it
-// is loaded when the module is enabled and hidden rather than closed, since
-// a window that has just loaded shows its first frames only after a second;
-// it is released after it has stayed hidden for the time the user chose.
+// capture is the window laid over the display under the mouse with a
+// frozen picture of it, where the user drags out the area to translate.
+// The text is read from that picture, so it is what the user saw. It holds
+// a screen-sized bitmap, so it exists only while shown.
 type capture struct {
-	app  *application.App
-	keep func() time.Duration
-
-	mu      sync.Mutex
-	win     *application.WebviewWindow
-	ready   bool   // the page has loaded
-	pending *Frame // a capture waiting for the page to load
-	seq     int    // the capture being shown
-	screen  application.Rect
-	image   platform.Image // the frozen screen, until the window hides
-	// starts counts captures, so a release timer that fires after the
-	// window was used again leaves it alone.
-	starts uint64
+	m      *Module
+	win    *ui.Window
+	shot   platform.Image
+	image  *ui.Image
+	drag   bool
+	from   ui.Point
+	to     ui.Point
+	closed bool
 }
 
-// create loads the window hidden. c.mu must be held.
-func (c *capture) create() {
-	win := c.app.Window.NewWithOptions(application.WebviewWindowOptions{
-		Name:             "capture",
-		Title:            "截图翻译",
-		URL:              "/capture.html",
-		Hidden:           true,
-		Frameless:        true,
-		AlwaysOnTop:      true,
-		DisableResize:    true,
-		BackgroundColour: application.NewRGB(0, 0, 0),
-		Mac: application.MacWindow{
-			DisableShadow: true,
-			CornerType:    application.MacWindowCornerTypeSquare,
-			// Like the popup, it takes the keyboard without activating
-			// arubox, and it covers the menu bar and the Dock.
-			WindowClass:      application.MacWindowClassPanel,
-			PanelPreferences: application.MacPanelPreferences{NonActivating: true, FloatingPanel: true},
-			WindowLevel:      application.MacWindowLevelScreenSaver,
-			CollectionBehavior: application.MacWindowCollectionBehaviorCanJoinAllSpaces |
-				application.MacWindowCollectionBehaviorFullScreenAuxiliary |
-				application.MacWindowCollectionBehaviorIgnoresCycle,
-		},
-		Windows: application.WindowsWindow{HiddenOnTaskbar: true},
-	})
-	win.OnWindowEvent(events.Common.WindowLostFocus, func(*application.WindowEvent) {
-		c.mu.Lock()
-		defer c.mu.Unlock()
-		if c.win == win {
-			c.hide()
-		}
-	})
-	c.win = win
-	c.ready = false
-}
-
-// visible reports whether a capture is being shown.
-func (c *capture) visible() bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.win != nil && c.win.IsVisible()
-}
-
-// start freezes the screen under the mouse and sends the picture to the
-// page, which shows the window once it has drawn it.
-func (c *capture) start() error {
-	if c.visible() {
-		return nil
+// newCapture shows shot, a picture of the display at b in physical pixels,
+// over that display. Call on the UI thread.
+func newCapture(m *Module, b ui.Bounds, shot platform.Image) (*capture, error) {
+	// The duplicated desktop leaves alpha undefined; the picture is drawn
+	// as opaque premultiplied pixels.
+	for i := 3; i < len(shot.Pixels); i += 4 {
+		shot.Pixels[i] = 255
 	}
-	screen := c.app.Screen.ScreenNearestDipPoint(platform.CursorPosition()).Bounds
-	img, err := platform.CaptureScreen(screen)
+	c := &capture{m: m, shot: shot, image: ui.NewImage(shot.Width, shot.Height, shot.Pixels)}
+	w, err := ui.NewWindow(ui.WindowOptions{Kind: ui.Overlay, Title: "截图翻译", Topmost: true, Bounds: b}, c)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.starts++
-	c.seq++
-	c.screen, c.image = screen, img
-	if c.win == nil {
-		c.create()
+	w.OnDeactivate = c.close
+	w.OnClose = func() bool {
+		c.close()
+		return false
 	}
-	platform.SetWindowFrame(c.win, screen)
-	frame := Frame{Seq: c.seq, Picture: img.Picture()}
-	if !c.ready {
-		c.pending = &frame
-		return nil
-	}
-	c.win.EmitEvent(frameEvent, frame)
-	return nil
+	c.win = w
+	w.Show(true)
+	return c, nil
 }
 
-// attach is called by the page once it has loaded. It returns the capture
-// that arrived while the page was loading, if any.
-func (c *capture) attach() *Frame {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.ready = true
-	f := c.pending
-	c.pending = nil
-	return f
-}
-
-// present shows the window once the page has drawn capture seq.
-func (c *capture) present(seq int) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.win == nil || seq != c.seq {
+// close takes the window down and lets go of the picture.
+func (c *capture) close() {
+	if c.closed {
 		return
 	}
-	c.win.Show()
-	c.win.Focus()
-}
-
-// picture returns the frozen screen being shown.
-func (c *capture) picture() (platform.Image, bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.image, c.image.Width > 0
-}
-
-// finish hides the window of capture seq and returns the part of its
-// picture inside area, given in points relative to the window.
-func (c *capture) finish(seq int, area application.Rect) (platform.Image, bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	img, screen := c.image, c.screen
-	if seq != c.seq || img.Width == 0 {
-		return platform.Image{}, false
+	c.closed = true
+	if c.m.capture == c {
+		c.m.capture = nil
 	}
-	c.hide()
-	// The picture has the screen's pixels, so it is larger than the window
-	// on high-density screens.
-	scale := float64(img.Width) / float64(screen.Width)
-	px := func(v int) int { return int(float64(v)*scale + 0.5) }
-	return img.Crop(px(area.X), px(area.Y), px(area.Width), px(area.Height)), true
-}
-
-func (c *capture) cancel() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.hide()
-}
-
-// hide hides the window, tells the page to let go of the picture and
-// schedules releasing the window. c.mu must be held.
-func (c *capture) hide() {
-	c.pending = nil
-	c.image = platform.Image{}
-	if c.win == nil || !c.win.IsVisible() {
+	w, img := c.win, c.image
+	c.shot, c.image = platform.Image{}, nil
+	if w == nil {
 		return
 	}
-	c.win.Hide()
-	c.win.EmitEvent(frameEndEvent)
-	c.scheduleRelease(c.keep())
-}
-
-// scheduleRelease closes the hidden window once it has stayed unused for
-// keep, or never when keep is 0. c.mu must be held.
-func (c *capture) scheduleRelease(keep time.Duration) {
-	if keep <= 0 {
-		return
-	}
-	starts := c.starts
-	time.AfterFunc(keep, func() {
-		c.mu.Lock()
-		defer c.mu.Unlock()
-		if c.starts == starts && c.win != nil && !c.win.IsVisible() {
-			c.destroy()
-		}
+	w.Hide()
+	// The window may be in the middle of its own frame; close it, and free
+	// the bitmap drawn from the picture, once that is over.
+	ui.Post(func() {
+		w.Close()
+		img.Release()
+		// The picture is tens of megabytes on a large display; give it back
+		// to the system now rather than whenever the runtime gets to it.
+		go debug.FreeOSMemory()
 	})
 }
 
-// destroy closes the window. c.mu must be held.
-func (c *capture) destroy() {
-	if c.win == nil {
-		return
-	}
-	c.win.Close()
-	c.win = nil
-	c.ready = false
-	c.pending = nil
-	c.image = platform.Image{}
+// selection is the dragged-out area in DIPs.
+func (c *capture) selection() ui.Rect {
+	x0, y0 := math.Min(c.from.X, c.to.X), math.Min(c.from.Y, c.to.Y)
+	return ui.Rect{X: x0, Y: y0, W: math.Abs(c.to.X - c.from.X), H: math.Abs(c.to.Y - c.from.Y)}
 }
 
-// frames serves the frozen screen to the capture page, so it never travels
-// as text through the bindings.
-type frames struct {
-	module *Module
+// finish reads the text in area, given in DIPs of the window.
+func (c *capture) finish(area ui.Rect) {
+	s := c.win.Scale()
+	px := func(v float64) int { return int(math.Round(v * s)) }
+	img := c.shot.Crop(px(area.X), px(area.Y), px(area.W), px(area.H))
+	c.close()
+	go c.m.readScreen(img)
 }
 
-func (h frames) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Cache-Control", "no-store")
-	c := h.module.currentCapture()
-	if c == nil || r.URL.Path != framePath {
-		http.NotFound(w, r)
+// Frame draws the frozen screen and the selection, and handles the drag.
+func (c *capture) Frame(f *ui.Frame) {
+	if c.closed {
 		return
 	}
-	img, ok := c.picture()
-	part, err := strconv.Atoi(r.URL.Query().Get("part"))
-	if !ok || err != nil {
-		http.NotFound(w, r)
+	full := f.Bounds()
+	f.Image(c.image, full, ui.Rect{}, 1, false)
+	f.SetCursor(full, ui.CursorCross)
+
+	if f.KeyPressed(ui.KeyEscape, 0) {
+		c.close()
 		return
 	}
-	img.ServeStrip(w, r, part)
+	res := f.Interact("screen", full)
+	ev := f.Event()
+	switch {
+	case res.RightClicked:
+		c.close()
+		return
+	case res.Pressed:
+		c.drag, c.from, c.to = true, ev.Pos, ev.Pos
+	case c.drag && ev.Kind == ui.EvMouseMove:
+		c.to = ev.Pos
+	case c.drag && ev.Kind == ui.EvMouseUp && ev.Button == 0:
+		c.to = ev.Pos
+		c.drag = false
+		if a := c.selection(); a.W >= minDrag && a.H >= minDrag {
+			c.finish(a)
+			return
+		}
+	}
+
+	shade := ui.Color{A: 0.35}
+	if !c.drag {
+		f.Fill(full, shade)
+		hint := "拖动框选要翻译的文字，Esc 或右键取消"
+		tw, _ := ui.MeasureText(hint, ui.Text{Size: 13}, 0)
+		pill := ui.Rect{X: (full.W - tw - 32) / 2, Y: 64, W: tw + 32, H: 30}
+		f.FillRound(pill, pill.H/2, ui.Color{A: 0.7})
+		f.Text(pill, hint, ui.Text{Size: 13, Color: ui.Color{R: 1, G: 1, B: 1, A: 1}, Align: ui.AlignCenter, Middle: true})
+		return
+	}
+	a := c.selection()
+	// Shade everything around the selection.
+	f.Fill(ui.Rect{W: full.W, H: a.Y}, shade)
+	f.Fill(ui.Rect{Y: a.Bottom(), W: full.W, H: full.H - a.Bottom()}, shade)
+	f.Fill(ui.Rect{Y: a.Y, W: a.X, H: a.H}, shade)
+	f.Fill(ui.Rect{X: a.Right(), Y: a.Y, W: full.W - a.Right(), H: a.H}, shade)
+	f.Stroke(a, 1, ui.Color{R: 1, G: 1, B: 1, A: 1}, false)
+
+	size := fmt.Sprintf("%d × %d", int(math.Round(a.W)), int(math.Round(a.H)))
+	tw, _ := ui.MeasureText(size, ui.Text{Size: 11}, 0)
+	tag := ui.Rect{X: a.X, Y: math.Max(a.Y-22, 2), W: math.Ceil(tw) + 12, H: 18}
+	f.FillRound(tag, 4, ui.Color{A: 0.7})
+	f.Text(tag, size, ui.Text{Size: 11, Color: ui.Color{R: 1, G: 1, B: 1, A: 1}, Align: ui.AlignCenter, Middle: true})
 }

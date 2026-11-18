@@ -8,6 +8,7 @@ import (
 	"time"
 	"unicode/utf16"
 
+	"github.com/shirumesu/arubox/internal/design"
 	"github.com/shirumesu/arubox/internal/platform"
 )
 
@@ -138,7 +139,8 @@ func (v *view) Pointer(e platform.PointerEvent) {
 	case platform.PointerWheel:
 		v.wheel(e)
 	case platform.PointerLeave:
-		if v.press == nil {
+		// The layer's own drag takes the mouse, which reads as leaving.
+		if v.press == nil && !v.dragging {
 			v.setHover(hit{part: hitDesktop})
 		}
 	case platform.PointerCancel:
@@ -227,7 +229,7 @@ func (v *view) selectRange(key string) {
 	v.clearSelection()
 	for i := min(a, b); i <= max(a, b); i++ {
 		v.selected[cells[i].item.Key] = true
-		v.invalidate(cells[i].rect)
+		v.invalidateCell(cells[i])
 	}
 }
 
@@ -312,9 +314,13 @@ func (v *view) move(e platform.PointerEvent) {
 		v.press = nil
 		v.d.Capture(e.X, e.Y, false)
 		if items := v.selectedItems(); len(items) > 0 {
+			v.dragging = true
 			v.d.Drag(items)
+			v.dragging = false
+			// The box the drag came from rolls up now if the drag ended
+			// outside it.
+			v.setHover(v.hitTest(v.lastX, v.lastY))
 		}
-		v.setDropBox("")
 	case pressTitle:
 		v.moveBox(p, e.X-p.x0, e.Y-p.y0)
 	case pressEdge:
@@ -354,22 +360,24 @@ func (v *view) setHover(h hit) {
 	}
 	if old.cell != h.cell {
 		if old.cell != nil {
-			v.invalidate(old.cell.rect)
+			v.invalidateCell(old.cell)
 		}
 		if h.cell != nil {
-			v.invalidate(h.cell.rect)
+			v.invalidateCell(h.cell)
 		}
 	}
-	if !v.settings.HoverExpand {
-		return
-	}
+	// A box open for a peek, or opened by a drag that dropped in it, rolls
+	// up once the pointer leaves it.
 	for id := range v.peeking {
-		if id != h.boxID() {
+		if id != h.boxID() && id != v.sprung {
 			delete(v.peeking, id)
 			if g := v.geoOf(id); g != nil {
 				v.animateHeight(g, g.m.title)
 			}
 		}
+	}
+	if !v.settings.HoverExpand {
+		return
 	}
 	if g := h.box; g != nil && g.box.Rolled && !v.peeking[g.box.ID] && h.part == hitTitle {
 		v.peeking[g.box.ID] = true
@@ -399,17 +407,35 @@ func (v *view) moveBox(p *press, dx, dy float64) {
 	r := p.start
 	r.X += dx
 	r.Y += dy
-	if v.settings.Snap {
-		mon := v.monitorAt(r.X+r.Width/2, r.Y+r.Height/2)
-		m := v.metrics(mon.Scale)
-		snapped := snapMove(fromBox(r), fromBox(mon.Work).Inset(m.gap), v.otherBoxes(p.box, mon), m.reach, m.gap)
-		r = toBox(snapped)
+	mon := v.monitorAt(r.X+r.Width/2, r.Y+r.Height/2)
+	m := v.metrics(mon.Scale)
+	area := v.snapArea(mon, m)
+	var snappedX, snappedY bool
+	if v.settings.Snap != SnapOff {
+		var s Rect
+		s, snappedX, snappedY = snapMove(fromBox(r), area, v.otherBoxes(p.box, mon), m.reach, v.snapGap(m))
+		r = toBox(s)
 	}
-	old := g.rect
-	v.setPlace(p.box, r)
+	// A box within reach of another, or of the edge, goes beside it;
+	// anywhere else it goes on the grid.
+	if v.settings.Grid {
+		if !snappedX {
+			r.X = toGrid(r.X, area.X, m.cellW)
+		}
+		if !snappedY {
+			r.Y = toGrid(r.Y, area.Y, m.cellH)
+		}
+	}
+	v.placeBox(g, r)
+}
+
+// placeBox moves a box being dragged to a rectangle of the screen.
+func (v *view) placeBox(g *boxGeo, r platform.Box) {
+	id, old := g.box.ID, g.rect
+	v.setPlace(id, r)
 	v.arrange()
 	v.invalidate(old)
-	if g := v.geoOf(p.box); g != nil {
+	if g := v.geoOf(id); g != nil {
 		v.invalidate(g.rect)
 	}
 }
@@ -425,24 +451,90 @@ func (v *view) otherBoxes(skip string, mon platform.DesktopMonitor) []Rect {
 	return out
 }
 
-// resizeBox follows an edge of a box being dragged.
+// snapArea is the part of a monitor boxes snap inside, and the grid's
+// origin.
+func (v *view) snapArea(mon platform.DesktopMonitor, m metrics) Rect {
+	if v.settings.Snap == SnapGap {
+		return fromBox(mon.Work).Inset(m.gap)
+	}
+	return fromBox(mon.Work)
+}
+
+// snapGap is the gap snapping leaves between boxes.
+func (v *view) snapGap(m metrics) float64 {
+	if v.settings.Snap == SnapGap {
+		return m.gap
+	}
+	return 0
+}
+
+// The frame a box adds around its cells: the padding on both sides, and
+// the title bar and the padding below.
+func (m metrics) frameW() float64 { return 2 * m.pad }
+func (m metrics) frameH() float64 { return m.title + m.pad }
+
+// fitGrid puts a box's rectangle on the grid, holding whole cells.
+func (v *view) fitGrid(r platform.Box) platform.Box {
+	mon := v.monitorAt(r.X+r.Width/2, r.Y+r.Height/2)
+	m := v.metrics(mon.Scale)
+	area := v.snapArea(mon, m)
+	r.X, r.Y = toGrid(r.X, area.X, m.cellW), toGrid(r.Y, area.Y, m.cellH)
+	r.Width, r.Height = toCells(r.Width, m.cellW, m.frameW()), toCells(r.Height, m.cellH, m.frameH())
+	return r
+}
+
+// resizeBox follows an edge of a box being dragged. On the grid the box
+// holds whole cells and the edges do not snap to other boxes, which would
+// cut cells in two.
 func (v *view) resizeBox(p *press, dx, dy float64) {
 	g := v.geoOf(p.box)
 	if g == nil {
 		return
 	}
 	m := g.m
-	minW, minH := m.cellW+2*m.pad, m.title+m.cellH/2+m.pad
 	r := p.start
-	area := fromBox(g.mon.Work).Inset(m.gap)
+	right, bottom := r.X+r.Width, r.Y+r.Height
+	if v.settings.Grid {
+		if p.edges&edgeLeft != 0 {
+			r.Width = toCells(right-(p.start.X+dx), m.cellW, m.frameW())
+			r.X = right - r.Width
+		}
+		if p.edges&edgeRight != 0 {
+			r.Width = toCells(right+dx-r.X, m.cellW, m.frameW())
+		}
+		if p.edges&edgeTop != 0 {
+			r.Height = toCells(bottom-(p.start.Y+dy), m.cellH, m.frameH())
+			r.Y = bottom - r.Height
+		}
+		if p.edges&edgeBottom != 0 {
+			r.Height = toCells(bottom+dy-r.Y, m.cellH, m.frameH())
+		}
+		v.placeBox(g, r)
+		return
+	}
+	minW, minH := m.cellW+m.frameW(), m.cellH/2+m.frameH()
+	area := v.snapArea(g.mon, m)
 	others := v.otherBoxes(p.box, g.mon)
+	// The box as the pointer stretches it, before snapping.
+	raw := fromBox(r)
+	if p.edges&edgeLeft != 0 {
+		raw.X, raw.W = raw.X+dx, raw.W-dx
+	}
+	if p.edges&edgeRight != 0 {
+		raw.W += dx
+	}
+	if p.edges&edgeTop != 0 {
+		raw.Y, raw.H = raw.Y+dy, raw.H-dy
+	}
+	if p.edges&edgeBottom != 0 {
+		raw.H += dy
+	}
 	snap := func(x float64, vertical bool) float64 {
-		if !v.settings.Snap {
+		if v.settings.Snap == SnapOff {
 			return x
 		}
-		return snapEdge(x, area, others, vertical, m.reach, m.gap)
+		return snapEdge(x, raw, area, others, vertical, m.reach, v.snapGap(m))
 	}
-	right, bottom := r.X+r.Width, r.Y+r.Height
 	if p.edges&edgeLeft != 0 {
 		r.X = math.Min(snap(p.start.X+dx, true), right-minW)
 		r.Width = right - r.X
@@ -457,13 +549,7 @@ func (v *view) resizeBox(p *press, dx, dy float64) {
 	if p.edges&edgeBottom != 0 {
 		r.Height = math.Max(minH, snap(bottom+dy, false)-r.Y)
 	}
-	old := g.rect
-	v.setPlace(p.box, r)
-	v.arrange()
-	v.invalidate(old)
-	if g := v.geoOf(p.box); g != nil {
-		v.invalidate(g.rect)
-	}
+	v.placeBox(g, r)
 }
 
 // dragBand follows a selection band and selects what it touches.
@@ -486,7 +572,7 @@ func (v *view) dragBand(p *press, x, y float64) {
 			} else {
 				delete(v.selected, c.item.Key)
 			}
-			v.invalidate(c.rect)
+			v.invalidateCell(c)
 		}
 	}
 }
@@ -607,8 +693,11 @@ func (v *view) showPortal(boxID string, p *portal) {
 func (v *view) createBox(r platform.Box, folder string) *Box {
 	mon := v.monitorAt(r.X+r.Width/2, r.Y+r.Height/2)
 	m := v.metrics(mon.Scale)
-	r.Width = math.Max(r.Width, m.cellW*2+2*m.pad)
-	r.Height = math.Max(r.Height, m.title+m.cellH+m.pad)
+	r.Width = math.Max(r.Width, m.cellW*2+m.frameW())
+	r.Height = math.Max(r.Height, m.cellH+m.frameH())
+	if v.settings.Grid {
+		r = v.fitGrid(r)
+	}
 	b := Box{ID: v.layout.newBoxID(), Title: "新建盒子", Folder: folder}
 	if folder != "" {
 		b.Title = filepath.Base(folder)
@@ -816,7 +905,7 @@ func (v *view) boxMenu(g *boxGeo, x, y float64, background bool) {
 		chosen = v.d.FolderMenu(v.portals[id].path, own, x, y)
 	case background:
 		// New items and pasted ones land in this box.
-		v.pending = &placement{box: id, x: x, y: y, until: time.Now().Add(10 * time.Second)}
+		v.pending = &placement{box: id, x: x, y: y, mark: v.markAt(id, x, y), until: time.Now().Add(10 * time.Second)}
 		chosen = v.d.FolderMenu(platform.DesktopFolder(), own, x, y)
 	default:
 		chosen = v.d.Menu(own, x, y)
@@ -877,7 +966,7 @@ func (v *view) renameItem(c *cell) {
 	labelY := r.Y + m.iconTop + m.icon + m.labelGap
 	box := platform.Box{X: r.X + (r.Width-m.labelW)/2 - m.pad, Y: labelY - m.labelGap/2, Width: m.labelW + 2*m.pad, Height: 3*m.line + m.pad}
 	v.editing = &editing{key: c.item.Key, box: boxID(c), known: name}
-	v.invalidate(r)
+	v.invalidateCell(c)
 	v.d.Edit(box, name, selectTo, v.editFont(m))
 }
 
@@ -897,7 +986,7 @@ func (v *view) renameBox(id string) {
 }
 
 func (v *view) editFont(m metrics) platform.Font {
-	return platform.Font{Family: v.tokens.Fonts[0], Size: m.font + m.scale, LineHeight: m.line}
+	return platform.Font{Family: design.Fonts[0], Size: m.font + m.scale, LineHeight: m.line}
 }
 
 // EditDone applies a name edited in place.
@@ -990,7 +1079,7 @@ func (v *view) Key(e platform.KeyEvent) {
 	case e.Ctrl && e.Key == 'A':
 		for _, c := range v.containerCells(v.selBox) {
 			v.selected[c.item.Key] = true
-			v.invalidate(c.rect)
+			v.invalidateCell(c)
 		}
 	case e.Ctrl && (e.Key == 'C' || e.Key == 'X') && len(items) > 0:
 		verb := "copy"
@@ -1003,7 +1092,7 @@ func (v *view) Key(e platform.KeyEvent) {
 		if p := v.portals[v.selBox]; p != nil {
 			folder = p.path
 		} else {
-			v.pending = &placement{box: v.selBox, x: v.lastX, y: v.lastY, until: time.Now().Add(10 * time.Second)}
+			v.pending = &placement{box: v.selBox, x: v.lastX, y: v.lastY, mark: v.markAt(v.selBox, v.lastX, v.lastY), until: time.Now().Add(10 * time.Second)}
 		}
 		v.d.PasteInto(folder, v.lastX, v.lastY)
 	case e.Key == vkF5:
@@ -1056,66 +1145,5 @@ func (v *view) moveSelection(key uint32) {
 	}
 	if best != nil {
 		v.selectOnly(v.selBox, best.item.Key)
-	}
-}
-
-// DropAt says what a drag over a point drops onto.
-func (v *view) DropAt(x, y float64, internal bool) platform.DropTarget {
-	v.lastX, v.lastY = x, y
-	if v.hidden {
-		return platform.DropTarget{}
-	}
-	h := v.hitTest(x, y)
-	if h.box != nil && h.box.box.Folder == "" {
-		v.setDropBox(h.boxID())
-	} else {
-		v.setDropBox("")
-	}
-	if h.part == hitItem && takesDrops(h.cell.item) && (!internal || !v.selected[h.cell.item.Key]) {
-		return platform.DropTarget{Kind: platform.DropItem, Item: h.cell.item}
-	}
-	if p := v.portals[h.boxID()]; p != nil {
-		return platform.DropTarget{Kind: platform.DropFolder, Path: p.path}
-	}
-	if internal && v.portals[v.selBox] == nil {
-		return platform.DropTarget{Kind: platform.DropHere}
-	}
-	return platform.DropTarget{Kind: platform.DropFolder, Path: platform.DesktopFolder()}
-}
-
-// takesDrops reports whether things dropped onto an item go into it or to
-// it: folders, programs, shortcuts and the Recycle Bin.
-func takesDrops(it platform.ShellItem) bool {
-	switch {
-	case it.Folder, strings.HasPrefix(it.Key, "::"):
-		return true
-	}
-	switch it.Ext {
-	case ".exe", ".lnk", ".bat", ".cmd":
-		return true
-	}
-	return false
-}
-
-// Dropped finishes a drop: the layer's own items move, and files dropped
-// in are placed once they appear.
-func (v *view) Dropped(x, y float64, t platform.DropTarget) {
-	v.setDropBox("")
-	h := v.hitTest(x, y)
-	switch {
-	case t.Kind == platform.DropHere:
-		keys := v.selectedKeys()
-		if g := h.box; g != nil && g.box.Folder == "" {
-			v.layout.put(g.box, keys, v.insertIndex(g, x, y))
-			v.selBox = g.box.ID
-			v.arrange()
-		} else {
-			v.selBox = ""
-			v.placeLoose(keys, x, y)
-		}
-		v.invalidateAll()
-		v.save()
-	case t.Kind == platform.DropFolder && t.Path == platform.DesktopFolder():
-		v.pending = &placement{box: h.boxID(), x: x, y: y, until: time.Now().Add(10 * time.Second)}
 	}
 }

@@ -7,7 +7,6 @@ import (
 	"sync"
 	"unsafe"
 
-	"github.com/wailsapp/wails/v3/pkg/application"
 	"golang.org/x/sys/windows"
 )
 
@@ -88,9 +87,10 @@ type mappedSubresource struct {
 	RowPitch, DepthPitch uint32
 }
 
-// captureDevice is the Direct3D device frames are read with, kept between
-// captures since making one takes about 200 ms. It belongs to the adapter
-// whose LUID is luid, and mu serializes captures.
+// captureDevice is the Direct3D device frames are read with. It lives in
+// the capture helper, which reads one picture and exits (see
+// capturehelper_windows.go). It belongs to the adapter whose LUID is luid,
+// and mu serializes captures.
 var captureDevice struct {
 	mu      sync.Mutex
 	luid    uint64
@@ -98,30 +98,9 @@ var captureDevice struct {
 	context comObject
 }
 
-// PrepareScreenCapture makes the device for reading the primary screen, so
-// the first capture is as quick as the next.
-func PrepareScreenCapture() {
-	var factory comObject
-	if hr, _, _ := procCreateDXGIFactory1.Call(uintptr(unsafe.Pointer(&iidIDXGIFactory1)), uintptr(unsafe.Pointer(&factory))); !succeeded(hr) || factory == nil {
-		return
-	}
-	defer release(factory)
-	adapter, output, _ := findOutput(factory, application.Rect{Width: 1, Height: 1})
-	if output == nil {
-		return
-	}
-	defer release(adapter)
-	defer release(output)
-	captureDevice.mu.Lock()
-	defer captureDevice.mu.Unlock()
-	if captureDevice.device == nil || captureDevice.luid != adapterLUID(adapter) {
-		makeCaptureDevice(adapter)
-	}
-}
-
 // capturePixels copies a rectangle of one screen, in physical pixels, as
 // top-down BGRA.
-func capturePixels(r application.Rect) ([]byte, error) {
+func capturePixels(r Rect) ([]byte, error) {
 	failed := errors.New("截取屏幕失败")
 	var factory comObject
 	if hr, _, _ := procCreateDXGIFactory1.Call(uintptr(unsafe.Pointer(&iidIDXGIFactory1)), uintptr(unsafe.Pointer(&factory))); !succeeded(hr) || factory == nil {
@@ -255,7 +234,7 @@ func adapterLUID(adapter comObject) uint64 {
 }
 
 // findOutput returns the screen holding the middle of r, with its adapter.
-func findOutput(factory comObject, r application.Rect) (adapter, output comObject, desc outputDesc) {
+func findOutput(factory comObject, r Rect) (adapter, output comObject, desc outputDesc) {
 	cx, cy := int32(r.X+r.Width/2), int32(r.Y+r.Height/2)
 	for i := uintptr(0); ; i++ {
 		var a comObject
@@ -281,7 +260,7 @@ func findOutput(factory comObject, r application.Rect) (adapter, output comObjec
 // desktopPixels copies r out of a duplicated frame as BGRA. The frame is in
 // the screen's own orientation, which a rotated screen turns. toSRGB maps
 // half floats to sRGB bytes for a floating-point frame, nil for a BGRA one.
-func desktopPixels(src []byte, pitch int, toSRGB *[65536]uint8, d outputDesc, r application.Rect) []byte {
+func desktopPixels(src []byte, pitch int, toSRGB *[65536]uint8, d outputDesc, r Rect) []byte {
 	out := make([]byte, r.Width*r.Height*4)
 	// The rows are converted on every core: one takes about 45 ms for a 4K
 	// screen.
@@ -297,7 +276,7 @@ func desktopPixels(src []byte, pitch int, toSRGB *[65536]uint8, d outputDesc, r 
 }
 
 // convertRows fills rows y0 to y1 of r in out, for desktopPixels.
-func convertRows(out, src []byte, pitch int, toSRGB *[65536]uint8, d outputDesc, r application.Rect, y0, y1 int) {
+func convertRows(out, src []byte, pitch int, toSRGB *[65536]uint8, d outputDesc, r Rect, y0, y1 int) {
 	w, h := int(d.Right-d.Left), int(d.Bottom-d.Top)
 	for y := y0; y < y1; y++ {
 		dy := r.Y + y - int(d.Top)

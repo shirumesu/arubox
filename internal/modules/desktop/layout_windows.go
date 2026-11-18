@@ -179,44 +179,98 @@ func sortItems(items []sortable, mode string) {
 	})
 }
 
-// snapMove moves r so its edges meet nearby edges of the area or of other
-// boxes, keeping a gap between boxes, when they are within reach.
-func snapMove(r Rect, area Rect, others []Rect, reach, gap float64) Rect {
+// A box snaps to another only where they are neighbours, so boxes far away
+// do not pull at it, and each side of another box offers one place, so an
+// edge does not flip between touching it and keeping the gap. Across, r
+// goes beside a box level with it, or lines its left or right edge up with
+// a box just above or below it; down likewise. What is level or just above
+// is judged from r as the pointer puts it, so the same pointer position
+// always snaps the same way.
+
+// overlaps reports whether the span [a0, a1) overlaps [b0, b1) by more
+// than d, so a box pushed up to d into another, as snapping beside it may
+// undo, still counts as beside it.
+func overlaps(a0, a1, b0, b1, d float64) bool { return a0+d < b1 && b0+d < a1 }
+
+// near reports whether the spans are apart by at most d.
+func near(a0, a1, b0, b1, d float64) bool { return a0 <= b1+d && b0 <= a1+d }
+
+// snapMove moves r so its edges meet nearby edges of the area or of
+// neighbouring boxes, keeping a gap beside them, when they are within
+// reach. It reports whether it moved r across and down.
+func snapMove(r Rect, area Rect, others []Rect, reach, gap float64) (Rect, bool, bool) {
 	xs := []float64{area.X, area.Right() - r.W}
 	ys := []float64{area.Y, area.Bottom() - r.H}
 	for _, o := range others {
-		// Beside the other box, or lined up with it.
-		xs = append(xs, o.Right()+gap, o.X-gap-r.W, o.X, o.Right()-r.W)
-		ys = append(ys, o.Bottom()+gap, o.Y-gap-r.H, o.Y, o.Bottom()-r.H)
+		level := overlaps(r.Y, r.Bottom(), o.Y, o.Bottom(), reach)
+		column := overlaps(r.X, r.Right(), o.X, o.Right(), reach)
+		switch {
+		case level:
+			xs = append(xs, o.Right()+gap, o.X-gap-r.W)
+		case near(r.Y, r.Bottom(), o.Y, o.Bottom(), gap+reach):
+			xs = append(xs, o.X, o.Right()-r.W)
+		}
+		switch {
+		case column:
+			ys = append(ys, o.Bottom()+gap, o.Y-gap-r.H)
+		case near(r.X, r.Right(), o.X, o.Right(), gap+reach):
+			ys = append(ys, o.Y, o.Bottom()-r.H)
+		}
 	}
-	r.X = nearest(r.X, xs, reach)
-	r.Y = nearest(r.Y, ys, reach)
-	return r
+	var sx, sy bool
+	r.X, sx = nearest(r.X, xs, reach)
+	r.Y, sy = nearest(r.Y, ys, reach)
+	return r, sx, sy
 }
 
-// snapEdge moves one edge's position v to a nearby edge.
-func snapEdge(v float64, area Rect, others []Rect, vertical bool, reach, gap float64) float64 {
+// snapEdge moves the position v of one edge of r, a left or right one when
+// vertical, to a nearby edge of the area or of a neighbouring box.
+func snapEdge(v float64, r Rect, area Rect, others []Rect, vertical bool, reach, gap float64) float64 {
 	var c []float64
 	if vertical {
 		c = append(c, area.X, area.Right())
 		for _, o := range others {
-			c = append(c, o.X, o.Right(), o.X-gap, o.Right()+gap)
+			switch {
+			case overlaps(r.Y, r.Bottom(), o.Y, o.Bottom(), reach):
+				c = append(c, o.X-gap, o.Right()+gap)
+			case near(r.Y, r.Bottom(), o.Y, o.Bottom(), gap+reach):
+				c = append(c, o.X, o.Right())
+			}
 		}
 	} else {
 		c = append(c, area.Y, area.Bottom())
 		for _, o := range others {
-			c = append(c, o.Y, o.Bottom(), o.Y-gap, o.Bottom()+gap)
+			switch {
+			case overlaps(r.X, r.Right(), o.X, o.Right(), reach):
+				c = append(c, o.Y-gap, o.Bottom()+gap)
+			case near(r.X, r.Right(), o.X, o.Right(), gap+reach):
+				c = append(c, o.Y, o.Bottom())
+			}
 		}
 	}
-	return nearest(v, c, reach)
+	v, _ = nearest(v, c, reach)
+	return v
 }
 
-func nearest(v float64, candidates []float64, reach float64) float64 {
-	best, dist := v, reach
+// nearest returns the candidate nearest to v within reach, and whether
+// there was one; else v.
+func nearest(v float64, candidates []float64, reach float64) (float64, bool) {
+	best, dist, found := v, reach, false
 	for _, c := range candidates {
 		if d := math.Abs(c - v); d < dist {
-			best, dist = c, d
+			best, dist, found = c, d, true
 		}
 	}
-	return best
+	return best, found
+}
+
+// toGrid moves v to the nearest line of a grid of steps from origin.
+func toGrid(v, origin, step float64) float64 {
+	return origin + math.Round((v-origin)/step)*step
+}
+
+// toCells rounds a box's length to a whole number of cells, at least one,
+// plus the frame around them.
+func toCells(length, step, frame float64) float64 {
+	return frame + max(1, math.Round((length-frame)/step))*step
 }
