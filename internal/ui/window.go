@@ -2,6 +2,7 @@ package ui
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"unsafe"
 
@@ -122,6 +123,11 @@ type Window struct {
 	scale      float64
 	width      int // client size in physical pixels
 	height     int
+	// icons are the big and small icons made from opts.Icon, destroyed
+	// with the window.
+	icons [2]uintptr
+	// drawErr is the drawing failure last logged, until a frame succeeds.
+	drawErr string
 
 	// OnClose runs when the user asks to close the window; returning false
 	// keeps it open. Without it, closing hides the window.
@@ -154,7 +160,10 @@ type Window struct {
 	nextTimer    uintptr
 }
 
-var shcore = windows.NewLazySystemDLL("shcore.dll")
+var (
+	shcore          = windows.NewLazySystemDLL("shcore.dll")
+	procDestroyIcon = user32.NewProc("DestroyIcon")
+)
 
 var allWindows = map[*Window]bool{}
 
@@ -234,9 +243,11 @@ func NewWindow(opts WindowOptions, view View) (*Window, error) {
 	if len(opts.Icon) > 0 {
 		if big := iconFromData(opts.Icon, 32); big != 0 {
 			procSendMessageW.Call(hwnd, 0x0080, 1, big) // WM_SETICON ICON_BIG
+			w.icons[0] = big
 		}
 		if small := iconFromData(opts.Icon, 16); small != 0 {
 			procSendMessageW.Call(hwnd, 0x0080, 0, small)
+			w.icons[1] = small
 		}
 	}
 	w.applyTheme()
@@ -462,14 +473,18 @@ func (w *Window) present() {
 
 // frame runs the view once, drawing the window, with ev as its input.
 func (w *Window) frame(ev Event) {
-	if w.destroyed || w.painting {
+	// A hidden window keeps no picture, and input that still reaches it,
+	// such as the release of the click that hid it or the mouse leaving
+	// it, would make one again for as long as it stays hidden.
+	if w.destroyed || w.painting || !w.Visible() {
 		return
 	}
 	if err := w.ensureTarget(); err != nil {
+		w.drawn(err)
 		return
 	}
 	w.painting = true
-	call(w.target, slotRTSetDpi, f32(96*w.scale), f32(96*w.scale))
+	callf(w.target, slotRTSetDpi, "ff", f32(96*w.scale), f32(96*w.scale))
 	call(w.target, slotRTBeginDraw)
 	c := w.canvas
 	c.Scale = w.scale
@@ -510,13 +525,29 @@ func (w *Window) frame(ev Event) {
 	case uint32(hr) == d2dErrRecreateTarget:
 		w.releaseTarget()
 		w.again = true
+	case !succeeded(hr):
+		w.drawn(fmt.Errorf("Direct2D 绘制失败（0x%08X）", uint32(hr)))
 	default:
+		w.drawn(nil)
 		w.present()
 	}
 	procValidateRect.Call(w.hwnd, 0)
 	if w.again {
 		w.again = false
 		procInvalidateRect.Call(w.hwnd, 0, 0)
+	}
+}
+
+// drawn records how drawing the window went: a failure is logged once, not
+// on every frame that fails the same way, until a frame succeeds.
+func (w *Window) drawn(err error) {
+	if err == nil {
+		w.drawErr = ""
+		return
+	}
+	if msg := err.Error(); msg != w.drawErr {
+		w.drawErr = msg
+		logger.Error("draw window", "window", w.opts.Title, "error", err)
 	}
 }
 
@@ -564,8 +595,9 @@ func (w *Window) handle(hwnd uintptr, m uint32, wp, lp uintptr) (uintptr, bool) 
 		w.scale = float64(loword(wp)) / 96
 		r := (*rect)(unsafe.Pointer(lp))
 		procSetWindowPos.Call(hwnd, 0, uintptr(r.Left), uintptr(r.Top), uintptr(r.Right-r.Left), uintptr(r.Bottom-r.Top), swpNoZOrder|swpNoActivate)
+		// The next frame gives each text box a font for the new scale,
+		// deleting its old one.
 		for _, e := range w.edits {
-			e.font = 0
 			e.place(e.r, e.vis, w)
 		}
 		w.Invalidate()
@@ -712,6 +744,13 @@ func (w *Window) handle(hwnd uintptr, m uint32, wp, lp uintptr) (uintptr, bool) 
 		w.releaseTarget()
 		for _, e := range w.edits {
 			e.release()
+		}
+		// A window does not destroy the icons it was given.
+		for i, h := range w.icons {
+			if h != 0 {
+				procDestroyIcon.Call(h)
+				w.icons[i] = 0
+			}
 		}
 		delete(allWindows, w)
 		if w.OnDestroy != nil {

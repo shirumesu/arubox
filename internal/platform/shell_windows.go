@@ -3,6 +3,7 @@ package platform
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -122,6 +123,10 @@ const (
 	shcneRenameItem = 0x00000001
 	shcneRenameDir  = 0x00020000
 	shcneAll        = 0x7FFFFFFF
+	// shcneItemEvents are the events whose ID lists are of items: renames,
+	// creations, deletions, attributes and updates of files and folders.
+	shcneItemEvents = 0x0002381F
+	shcneInterrupt  = 0x80000000 // the event came from the file system
 
 	shChangeNotifyEntrySize = 12
 
@@ -140,6 +145,10 @@ type ShellItem struct {
 	// as the Recycle Bin.
 	Key  string
 	Name string
+	// ID names the file itself, on its volume, the same under any name,
+	// so an item can be followed when renamed. Only desktop items have
+	// one, and only files whose ID could be read; see fileID.
+	ID string
 	// Folder is a folder one can open into; an archive is not one.
 	Folder   bool
 	Ext      string // the extension, lowercased, of files
@@ -174,7 +183,7 @@ func DesktopItems() ([]ShellItem, error) {
 	}
 	defer release(root)
 	shown := shownSystemIcons()
-	return enumerate(root, 0, func(it ShellItem) bool {
+	items, err := enumerate(root, 0, func(it ShellItem) bool {
 		// Namespace extensions, such as the Recycle Bin, or the user's
 		// folder and Music, whose parsing names are file system paths, are
 		// ::{CLSID} by their names in the desktop.
@@ -183,6 +192,44 @@ func DesktopItems() ([]ShellItem, error) {
 		}
 		return true
 	})
+	if err != nil {
+		return nil, err
+	}
+	for i := range items {
+		if filepath.IsAbs(items[i].Key) {
+			items[i].ID = fileID(items[i].Key)
+		}
+	}
+	return items, nil
+}
+
+// fileID returns the ID of a file or folder: its volume's serial number
+// and its 128-bit file ID, which NTFS and ReFS keep through a rename and
+// never give another file. It returns "" when the file cannot be opened,
+// is gone, or is on a file system without file IDs: such an item is not
+// followed through a rename, and is otherwise the same.
+func fileID(path string) string {
+	p, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return ""
+	}
+	// Opening for attributes only, without following a link, reads the
+	// item itself and keeps no one else from using it.
+	h, err := windows.CreateFile(p, windows.FILE_READ_ATTRIBUTES,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil,
+		windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if err != nil {
+		return ""
+	}
+	defer func() { _ = windows.CloseHandle(h) }()
+	var info struct {
+		Volume uint64
+		ID     [16]byte
+	}
+	if err := windows.GetFileInformationByHandleEx(h, windows.FileIdInfo, (*byte)(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info))); err != nil {
+		return ""
+	}
+	return fmt.Sprintf("%016x-%x", info.Volume, info.ID)
 }
 
 // FolderItems lists a folder's items.
@@ -413,10 +460,15 @@ func DesktopFolder() string {
 // the caller does itself since there is no File Explorer view to do it.
 const MenuRename = -1
 
+// MenuShell is what ItemMenu and FolderMenu return when the user chose one
+// of File Explorer's own entries, which they carried out, such as New or
+// Paste.
+const MenuShell = -2
+
 // ItemMenu shows File Explorer's context menu for items of one folder at a
 // screen point, below the caller's own entries, and carries out what the
 // user chooses there. It returns the ID of an own entry chosen, MenuRename,
-// or 0.
+// MenuShell, or 0 when the menu was dismissed.
 func (d *Desktop) ItemMenu(items []ShellItem, own []MenuItem, x, y float64, extended bool) int {
 	cm, err := uiObject(items, &iidIContextMenu)
 	if err != nil {
@@ -426,7 +478,8 @@ func (d *Desktop) ItemMenu(items []ShellItem, own []MenuItem, x, y float64, exte
 }
 
 // FolderMenu shows the context menu of a folder's background, such as New
-// and Paste, below the caller's own entries.
+// and Paste, below the caller's own entries. It returns what ItemMenu
+// does.
 func (d *Desktop) FolderMenu(path string, own []MenuItem, x, y float64) int {
 	cm, err := folderObject(path, &iidIContextMenu)
 	if err != nil {
@@ -481,7 +534,7 @@ func (d *Desktop) shellMenu(cm comObject, own []MenuItem, x, y float64, extended
 		return MenuRename
 	}
 	invoke(cm, uintptr(chosen-menuFirstShell), "", s.hwnd, x, y)
-	return 0
+	return MenuShell
 }
 
 func handleMenuMessage(cm comObject, m, w, l uintptr) (uintptr, bool) {
@@ -713,12 +766,24 @@ func (d *Desktop) shellNotified(w, l uintptr) {
 	if lock == 0 {
 		return
 	}
+	// Only the events about items carry them; the others, such as an
+	// image or association changing, name no item.
+	var names [2]string
+	var changed []string
+	if uint32(event)&^(shcneItemEvents|shcneInterrupt) == 0 && pidls != nil {
+		for i, p := range pidls {
+			if p != 0 {
+				names[i] = absoluteName(p)
+				changed = append(changed, names[i])
+			}
+		}
+	}
 	var renames [][2]string
-	if event&(shcneRenameItem|shcneRenameDir) != 0 && pidls != nil && pidls[0] != 0 && pidls[1] != 0 {
-		renames = append(renames, [2]string{absoluteName(pidls[0]), absoluteName(pidls[1])})
+	if event&(shcneRenameItem|shcneRenameDir) != 0 && names[0] != "" && names[1] != "" {
+		renames = append(renames, names)
 	}
 	procSHChangeNotificationUnlock.Call(lock)
-	d.handler.ShellChanged(renames)
+	d.handler.ShellChanged(changed, renames)
 }
 
 func absoluteName(pidl uintptr) string {
@@ -783,6 +848,8 @@ var dropVtbl = [7]uintptr{
 // dropTargets keeps the targets reachable while COM holds them.
 var dropTargets = map[uintptr]*dropTarget{}
 
+// newDropTarget makes a surface's drop target, holding one reference for
+// the surface, which release gives up.
 func newDropTarget(d *Desktop, s *surface) *dropTarget {
 	t := &dropTarget{vtbl: &dropVtbl, refs: 1, d: d, s: s}
 	dropTargets[uintptr(unsafe.Pointer(t))] = t
@@ -792,6 +859,10 @@ func newDropTarget(d *Desktop, s *surface) *dropTarget {
 	}
 	return t
 }
+
+// release gives up the surface's reference, once the window no longer
+// takes drops; the target goes once COM lets go of it too.
+func (t *dropTarget) release() { dropRelease(uintptr(unsafe.Pointer(t))) }
 
 func dropOf(this uintptr) *dropTarget { return dropTargets[this] }
 

@@ -153,9 +153,10 @@ func convert(c conversion, perEuro map[string]float64, date, home string) []Resu
 		targets = []string{home, "USD", "EUR"}
 	}
 	var results []Result
-	for _, to := range targets {
+	for i, to := range targets {
+		// The home currency may be one of the others, US dollars or euros.
 		toRate, ok := perEuro[to]
-		if !ok || to == c.from || len(results) == 2 {
+		if !ok || to == c.from || slices.Contains(targets[:i], to) || len(results) == 2 {
 			continue
 		}
 		value := c.amount / fromRate * toRate

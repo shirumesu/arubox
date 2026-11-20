@@ -3,10 +3,6 @@
 // top-left corner of the primary display.
 package platform
 
-import (
-	"time"
-)
-
 // Rect is a rectangle in physical screen pixels.
 type Rect struct {
 	X, Y, Width, Height int
@@ -32,13 +28,6 @@ type App struct {
 	// Alias is another name the app goes by, such as its English name next
 	// to a localized one. It may be empty.
 	Alias string
-}
-
-// FoundFile is a file or folder found by name.
-type FoundFile struct {
-	Path string
-	// LastUsed is when the user last opened it, or zero if unknown.
-	LastUsed time.Time
 }
 
 // Image is a picture of the screen as top-down BGRA pixels.

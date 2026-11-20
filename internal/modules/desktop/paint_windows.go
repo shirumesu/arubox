@@ -192,6 +192,10 @@ func (v *view) drawBox(c *platform.Canvas, g *boxGeo, dirty platform.Box, skip *
 		hint := "把图标拖到这里"
 		if b.Folder != "" {
 			hint = "文件夹是空的"
+			if p := v.portals[b.ID]; p != nil && p.err != nil {
+				// The message names the folder and what went wrong.
+				hint = p.err.Error()
+			}
 		}
 		if t := v.text(hint, g.content.Width, m.font, m.line, 2, false); t != nil {
 			c.DrawText(t, g.content.X, g.content.Y+(g.content.Height-t.Height)/2, white.WithAlpha(0.5))

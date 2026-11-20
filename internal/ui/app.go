@@ -2,6 +2,7 @@ package ui
 
 import (
 	"errors"
+	"log/slog"
 	"runtime"
 	"sync"
 	"syscall"
@@ -44,6 +45,9 @@ var (
 	darkNow       bool
 
 	secondInstance func()
+	// logger takes the failures nothing can be returned to, such as a
+	// window that cannot be drawn while it handles a message.
+	logger         *slog.Logger
 	msgSecond      uint32
 	msgTaskbarMade uint32
 	quitHooks      []func()
@@ -62,6 +66,9 @@ type Options struct {
 	// OnSecondInstance runs on the UI thread when the program is started
 	// again while running; the second copy then exits.
 	OnSecondInstance func()
+	// Log takes the failures that happen while windows handle messages,
+	// where there is no caller to return them to. It is required.
+	Log *slog.Logger
 }
 
 // ErrRunning is returned by Run when another copy of the program is
@@ -71,6 +78,10 @@ var ErrRunning = errors.New("ui: already running")
 // Run starts the UI thread, calls start on it and handles messages until
 // Quit. It returns ErrRunning when another copy already runs.
 func Run(opts Options, start func()) error {
+	if opts.Log == nil {
+		return errors.New("ui: Options.Log is required")
+	}
+	logger = opts.Log
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 

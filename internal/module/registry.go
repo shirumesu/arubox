@@ -74,13 +74,19 @@ func (r *Registry) Start() {
 	}
 }
 
-// Stop disables every running module, at shutdown.
+// Stop disables every running module, at shutdown, and waits for what
+// their Disable left running, a module disabled earlier included.
 func (r *Registry) Stop() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, s := range slices.Backward(r.slots) {
 		if s.enabled {
 			r.disable(s)
+		}
+	}
+	for _, s := range r.slots {
+		if m, ok := s.module.(Settler); ok {
+			m.Settle()
 		}
 	}
 }
@@ -97,14 +103,20 @@ func (r *Registry) SetEnabled(id string, enabled bool) error {
 	if enabled == s.enabled {
 		return nil
 	}
-	if enabled {
-		if err := r.enable(s); err != nil {
-			return fmt.Errorf("「%s」启动失败：%w", s.info.Name, err)
+	// A choice that cannot be saved is undone, so the module runs as it
+	// will after a restart.
+	if !enabled {
+		if err := r.store.SetModuleEnabled(id, false); err != nil {
+			return fmt.Errorf("保存设置失败：%w", err)
 		}
-	} else {
 		r.disable(s)
+		return nil
 	}
-	if err := r.store.SetModuleEnabled(id, enabled); err != nil {
+	if err := r.enable(s); err != nil {
+		return fmt.Errorf("「%s」启动失败：%w", s.info.Name, err)
+	}
+	if err := r.store.SetModuleEnabled(id, true); err != nil {
+		r.disable(s)
 		return fmt.Errorf("保存设置失败：%w", err)
 	}
 	return nil

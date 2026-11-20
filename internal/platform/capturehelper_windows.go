@@ -9,7 +9,9 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"sync/atomic"
 	"syscall"
+	"time"
 )
 
 // The screen is read through DXGI desktop duplication, which is quick and
@@ -19,6 +21,11 @@ import (
 // started with flagCapture, which writes the pixels to its stdout and
 // exits, taking the driver with it.
 const flagCapture = "--capture-screen"
+
+// captureTimeout is how long the helper may take, where it takes a fraction
+// of a second. One that takes longer is stuck in the graphics driver and is
+// ended, so the capture fails instead of never finishing.
+const captureTimeout = 10 * time.Second
 
 // RunCaptureHelper runs the capture helper when args ask for it, and
 // reports whether they did.
@@ -63,6 +70,14 @@ func capturePixelsInHelper(r Rect) ([]byte, error) {
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
+	// Ending the helper breaks the pipe, which ends the reads and the wait.
+	var stuck atomic.Bool
+	timer := time.AfterFunc(captureTimeout, func() {
+		stuck.Store(true)
+		// Killing fails only for a process that has already ended.
+		_ = cmd.Process.Kill()
+	})
+	defer timer.Stop()
 	in := bufio.NewReaderSize(stdout, 1<<20)
 	var size uint32
 	readErr := binary.Read(in, binary.LittleEndian, &size)
@@ -79,6 +94,9 @@ func capturePixelsInHelper(r Rect) ([]byte, error) {
 		_, readErr = io.ReadFull(in, pixels)
 	}
 	waitErr := cmd.Wait()
+	if stuck.Load() {
+		return nil, errors.New("截取屏幕失败：截图进程没有响应")
+	}
 	if len(message) > 0 {
 		return nil, errors.New(string(message))
 	}

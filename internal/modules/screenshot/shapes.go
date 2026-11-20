@@ -32,7 +32,8 @@ type shape struct {
 	color    ui.Color
 	width    float64   // the stroke width, or the text's size
 	mosaic   *ui.Image // the mosaic's blocks, one pixel each
-	mosaicAt ui.Rect   // the box mosaic was made for
+	mosaicAt ui.Rect   // the box mosaic is drawn in
+	mosaicOf ui.Rect   // the box mosaic's blocks were averaged over
 }
 
 // textFamily is the font annotations are typed and drawn in: the one the
@@ -273,14 +274,23 @@ func mosaicPixels(img platform.Image, px platform.Rect, cols, rows int) []byte {
 	return out
 }
 
-// updateMosaic remakes a mosaic's blocks for its current box. It does
-// nothing while the box keeps its grid, which most mouse moves do not.
-func updateMosaic(s *shape, img platform.Image, scale float64) {
+// updateMosaic remakes a mosaic's blocks for its current box. While it is
+// dragged out (exact false), a box that keeps its grid stretches the
+// blocks already made rather than averaging every pixel under it again
+// on each mouse move; the exact blocks are made when it is let go.
+func updateMosaic(s *shape, img platform.Image, scale float64, exact bool) {
 	b := boxFrom(s.from, s.to)
-	if s.mosaic != nil && b == s.mosaicAt {
+	if s.mosaic != nil && b == s.mosaicOf {
+		s.mosaicAt = b
 		return
 	}
-	s.mosaicAt = b
+	if !exact && s.mosaic != nil && b.W >= 1 && b.H >= 1 {
+		if cols, rows := mosaicGrid(b); cols == s.mosaic.Width && rows == s.mosaic.Height {
+			s.mosaicAt = b
+			return
+		}
+	}
+	s.mosaicAt, s.mosaicOf = b, b
 	if s.mosaic != nil {
 		s.mosaic.Release()
 		s.mosaic = nil

@@ -23,7 +23,10 @@ import (
 // and shortcuts keep pointing at the program. The desktop guard is the same
 // file started again; it keeps running from the moved file until the
 // program has given the desktop back. The file index service has its own
-// copy under Program Files, which is replaced first, with the new file.
+// copy under Program Files, which is replaced next, from the new file in
+// its place; the two speak a protocol of their version. When that fails,
+// the running file is put back, so the program and the service stay of
+// one version.
 
 // flagUpdated starts the new version: the flag and the process ID of the
 // copy that installed it.
@@ -43,8 +46,7 @@ func unavailable() string {
 func needsElevation() (bool, error) { return fileindex.ServiceInstalled() }
 
 // files are the paths an update uses: the running executable, the new one
-// beside it and the old one once moved aside. The names keep ".exe" so the
-// new one can be run as administrator to replace the service's copy.
+// beside it and the old one once moved aside.
 func files() (exe, staged, old string, err error) {
 	exe, err = os.Executable()
 	if err != nil {
@@ -54,10 +56,10 @@ func files() (exe, staged, old string, err error) {
 	return exe, base + ".new.exe", base + ".old.exe", nil
 }
 
-// put downloads the new executable, updates the file index service with
-// it if the service is installed, and swaps it in for the running one.
-// The returned function starts the new version, which waits for this
-// process to exit.
+// put downloads the new executable, swaps it in for the running one and
+// updates the file index service with it if the service is installed. The
+// returned function starts the new version, which waits for this process
+// to exit.
 func put(ctx context.Context, client *http.Client, file packageFile, progress func(int64), installing func()) (func() error, error) {
 	exe, staged, old, err := files()
 	if err != nil {
@@ -69,9 +71,6 @@ func put(ctx context.Context, client *http.Client, file packageFile, progress fu
 	}
 	installing()
 	service, err := fileindex.ServiceInstalled()
-	if err == nil && service {
-		err = fileindex.UpdateService(staged)
-	}
 	if err != nil {
 		os.Remove(staged)
 		return nil, err
@@ -86,6 +85,16 @@ func put(ctx context.Context, client *http.Client, file packageFile, progress fu
 			return nil, fmt.Errorf("无法放入新版本（%w），也无法放回原来的版本（%w）；原来的版本在 %s", err, rerr, old)
 		}
 		return nil, fmt.Errorf("无法放入新版本：%w", err)
+	}
+	if service {
+		if err := fileindex.UpdateService(exe); err != nil {
+			// One rename puts the running file back over the new one,
+			// which is not running.
+			if rerr := os.Rename(old, exe); rerr != nil {
+				return nil, fmt.Errorf("%w；也无法放回原来的版本（%w），原来的版本在 %s", err, rerr, old)
+			}
+			return nil, err
+		}
 	}
 	return func() error {
 		cmd := exec.Command(exe, flagUpdated, strconv.Itoa(os.Getpid()))

@@ -22,7 +22,7 @@ import (
 // protocolVersion changes whenever the frames change. A program and a
 // service of different versions cannot talk, and the program asks to
 // reinstall the service.
-const protocolVersion = 1
+const protocolVersion = 2
 
 // helloMagic starts the program's hello, so a stray client is told apart.
 const helloMagic = "ARUBOXIX"
@@ -48,6 +48,10 @@ const (
 const (
 	changeDelete byte = iota
 	changeSet
+	// changeMoved is a changeSet for a file renamed or moved. A folder
+	// moved into the index from outside it, as out of an excluded folder,
+	// brings files the journal never tells of; the program lists them.
+	changeMoved
 )
 
 // Entry flags, as sent and as stored.

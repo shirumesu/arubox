@@ -1,6 +1,7 @@
 package platform
 
 import (
+	"errors"
 	"runtime"
 	"time"
 	"unsafe"
@@ -53,7 +54,7 @@ func SelectedText() (string, error) {
 	if text := uiaSelectedText(); text != "" {
 		return text, nil
 	}
-	return copySelection(), nil
+	return copySelection()
 }
 
 func uiaSelectedText() string {
@@ -161,10 +162,12 @@ const (
 	copyLate = 200 * time.Millisecond
 )
 
-func copySelection() string {
+func copySelection() (string, error) {
 	// The hotkey's keys are still held when it fires. The copy is sent once
 	// they are let go, so the program sees a plain copy.
-	maskModifierRelease()
+	if err := maskModifierRelease(); err != nil {
+		return "", err
+	}
 	waitForKeysUp()
 
 	runtime.LockOSThread()
@@ -172,24 +175,26 @@ func copySelection() string {
 	// The clipboard can only be written back by a window that owns it.
 	owner, err := createMessageWindow()
 	if err != nil {
-		return ""
+		return "", err
 	}
 	defer procDestroyWindow.Call(owner)
 
 	// The clipboard is emptied, so whatever lands on it is the copy.
 	saved, ok := takeClipboard(owner)
 	if !ok {
-		return ""
+		return "", errors.New("剪贴板被其他程序占用")
 	}
 	defer restoreClipboard(owner, unmonitored(saved))
 	for _, k := range copyKeys {
 		before, _, _ := procGetClipboardSequenceNumber.Call()
-		pressCopy(k.vk, k.extended)
+		if err := pressCopy(k.vk, k.extended); err != nil {
+			return "", err
+		}
 		if text, copied := awaitCopy(owner, uint32(before), k.wait); copied {
-			return text
+			return text, nil
 		}
 	}
-	return ""
+	return "", nil
 }
 
 // awaitCopy waits for the clipboard to change from sequence number before

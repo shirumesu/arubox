@@ -83,6 +83,8 @@ func (p *settingsPage) save(row string, s Settings) bool {
 		return false
 	}
 	delete(p.errs, row)
+	// File search may have been turned on or off.
+	p.statusAt = time.Time{}
 	return true
 }
 
@@ -100,6 +102,11 @@ func (p *settingsPage) Draw(f *ui.Frame, x, y, w float64) float64 {
 // page is drawn, and schedules the repaint that shows it.
 func (p *settingsPage) pollStatus(w *ui.Window) {
 	if time.Since(p.statusAt) >= statusEvery {
+		// The page shows the index's progress, so it keeps the index
+		// loaded while it is drawn.
+		if err := p.m.useFiles(); err != nil {
+			p.m.log.Error("start file index", "error", err)
+		}
 		p.status, p.statusAt = p.m.fileIndexStatus(), time.Now()
 	}
 	if p.ticking && p.tickWin == w {
@@ -172,6 +179,10 @@ func indexDescription(st FileIndexStatus) string {
 	switch st.State {
 	case "off":
 		return "开启启动器后可用。"
+	case "idle":
+		return "启动器一段时间没用，文件列表已从内存释放，打开启动器时会自动重新载入。"
+	case "unused":
+		return "文件搜索已关闭：打开上面的“搜索文件和文件夹”，或设置“搜索文件”关键词后可用。"
 	case "missing":
 		return "安装后，输入名称就能立刻找到所有硬盘上的文件。安装时需要管理员授权一次。"
 	case "stopped":

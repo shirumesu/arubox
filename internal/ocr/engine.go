@@ -84,6 +84,9 @@ func New(store Store, log *slog.Logger, dir string) *Engine {
 			DialContext:           (&net.Dialer{Timeout: 15 * time.Second}).DialContext,
 			TLSHandshakeTimeout:   15 * time.Second,
 			ResponseHeaderTimeout: 30 * time.Second,
+			// The files are fetched once; the connections need not outlast
+			// the download.
+			IdleConnTimeout: 30 * time.Second,
 		}},
 	}
 }
@@ -116,7 +119,7 @@ func (e *Engine) ImageText(img platform.Image) ([]platform.TextLine, error) {
 	}
 	e.uses++
 	lines, err := e.worker.read(img)
-	if errors.Is(err, errWorkerDied) {
+	if workerEnded(err) {
 		e.worker = nil
 	}
 	if err != nil {

@@ -4,7 +4,6 @@ import (
 	"cmp"
 	"slices"
 	"strings"
-	"time"
 	"unicode"
 	"unicode/utf8"
 )
@@ -157,22 +156,6 @@ const pinyinPenalty = 50
 // clearly better match.
 func launchBoost(count int) int {
 	return min(count*20, 200)
-}
-
-// recencyBoost lifts files the user opened lately.
-func recencyBoost(used, now time.Time) int {
-	if used.IsZero() {
-		return 0
-	}
-	switch age := now.Sub(used); {
-	case age < 24*time.Hour:
-		return 150
-	case age < 7*24*time.Hour:
-		return 100
-	case age < 30*24*time.Hour:
-		return 50
-	}
-	return 0
 }
 
 type scored struct {

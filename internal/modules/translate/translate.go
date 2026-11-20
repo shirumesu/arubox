@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/shirumesu/arubox/internal/hotkey"
@@ -45,6 +46,14 @@ type Module struct {
 	settings Settings
 	enabled  bool
 
+	// requests numbers what the popup is asked to show. A selection or a
+	// picture's text that takes a while to read shows only if nothing was
+	// asked for since, so it does not wipe out what the user is typing.
+	requests atomic.Uint64
+	// capturing is set from when the screen starts being taken until its
+	// window is up, so that a second press does not take it again.
+	capturing atomic.Bool
+
 	// The windows belong to the UI thread and are only touched there. They
 	// exist while shown: native windows are cheap to make, so nothing is
 	// kept ready while hidden.
@@ -60,8 +69,10 @@ func New(store Store, log *slog.Logger, reader TextReader) *Module {
 		settings = defaultSettings()
 	}
 	client := &http.Client{
-		Timeout:   15 * time.Second,
-		Transport: &http.Transport{Proxy: platform.SystemProxy, ForceAttemptHTTP2: true},
+		Timeout: 15 * time.Second,
+		// Connections are kept for the next translation of a session, not
+		// for good.
+		Transport: &http.Transport{Proxy: platform.SystemProxy, ForceAttemptHTTP2: true, IdleConnTimeout: 90 * time.Second},
 	}
 	m := &Module{
 		store:    store,
@@ -127,51 +138,60 @@ func (m *Module) isEnabled() bool {
 	return m.enabled
 }
 
-// open shows req in the popup, from any goroutine.
-func (m *Module) open(req request) {
+// open shows req in the popup, from any goroutine, unless the popup has
+// been asked for something else since seq, from m.requests, was taken.
+func (m *Module) open(seq uint64, req request) {
 	ui.Post(func() {
-		if m.isEnabled() {
+		if m.isEnabled() && m.requests.Load() == seq {
 			m.popup.open(req)
 		}
 	})
 }
 
 func (m *Module) translateInput() {
-	m.open(request{})
+	m.open(m.requests.Add(1), request{})
 }
 
 // translateSelection reads the selection on the hotkey's goroutine, since
 // it may simulate a copy and wait for it.
 func (m *Module) translateSelection() {
+	seq := m.requests.Add(1)
 	text, err := platform.SelectedText()
 	switch {
 	case err != nil:
 		m.log.Warn("read selection", "error", err)
-		m.open(request{notice: "读取选中的文字失败，可以直接输入要翻译的内容。"})
+		m.open(seq, request{notice: "读取选中的文字失败，可以直接输入要翻译的内容。"})
 	case strings.TrimSpace(text) == "":
-		m.open(request{notice: "没有取到选中的文字，可以直接输入要翻译的内容。"})
+		m.open(seq, request{notice: "没有取到选中的文字，可以直接输入要翻译的内容。"})
 	default:
-		m.open(request{text: text})
+		m.open(seq, request{text: text})
 	}
 }
 
 // translateScreen freezes the display under the mouse and lets the user
 // drag out an area whose text is then translated.
 func (m *Module) translateScreen() {
-	var busy bool
-	ui.Sync(func() { busy = m.capture != nil })
-	if busy || !m.isEnabled() {
+	if !m.isEnabled() || !m.capturing.CompareAndSwap(false, true) {
 		return
 	}
+	var busy bool
+	ui.Sync(func() { busy = m.capture != nil })
+	if busy {
+		m.capturing.Store(false)
+		return
+	}
+	seq := m.requests.Add(1)
 	mon := ui.MonitorAt(ui.CursorPos())
 	b := mon.Bounds
 	img, err := platform.CaptureScreen(platform.Rect{X: b.X, Y: b.Y, Width: b.W, Height: b.H})
 	if err != nil {
+		m.capturing.Store(false)
 		m.log.Warn("capture screen", "error", err)
-		m.open(request{notice: err.Error() + "，可以直接输入要翻译的内容。"})
+		m.open(seq, request{notice: err.Error() + "，可以直接输入要翻译的内容。"})
 		return
 	}
 	ui.Post(func() {
+		defer m.capturing.Store(false)
 		if m.capture != nil || !m.isEnabled() {
 			return
 		}
@@ -186,17 +206,17 @@ func (m *Module) translateScreen() {
 
 // readScreen reads the text in img, the area the user dragged out, and
 // translates it. It runs on its own goroutine.
-func (m *Module) readScreen(img platform.Image) {
+func (m *Module) readScreen(seq uint64, img platform.Image) {
 	lines, err := m.reader.ImageText(img)
 	text := platform.Paragraphs(lines)
 	switch {
 	case err != nil:
 		m.log.Warn("read screen", "error", err)
-		m.open(request{notice: err.Error() + "，可以直接输入要翻译的内容。"})
+		m.open(seq, request{notice: err.Error() + "，可以直接输入要翻译的内容。"})
 	case strings.TrimSpace(text) == "":
-		m.open(request{notice: "没有在选中的区域里识别到文字。"})
+		m.open(seq, request{notice: "没有在选中的区域里识别到文字。"})
 	default:
-		m.open(request{text: text})
+		m.open(seq, request{text: text})
 	}
 }
 
@@ -252,7 +272,7 @@ func (m *Module) Available() bool {
 // OpenText shows text, translated, in the popup. It is safe from any
 // goroutine.
 func (m *Module) OpenText(text string) {
-	m.open(request{text: text})
+	m.open(m.requests.Add(1), request{text: text})
 }
 
 // engine translates text from one language into another.

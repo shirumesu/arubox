@@ -5,7 +5,7 @@ vars:
   # The one place the version is written. The executable's version resource
   # and the build itself take it from here; release CI checks the tag and
   # CHANGELOG.md against it.
-  VERSION: 0.2.0
+  VERSION: 0.2.1
   # Windows wants plain numbers, so a prerelease uses those of the release
   # it leads to.
   NUMERIC_VERSION: '{{index (splitList "-" .VERSION) 0}}'
@@ -42,7 +42,9 @@ tasks:
         vars:
           ARCH: '{{.ARCH}}'
           OUT: '{{.APP_NAME}}.exe'
-          FLAGS: -trimpath -buildvcs=false -ldflags="-w -s -H windowsgui {{.LDFLAGS_VERSION}}"
+          # The production tag makes a build that updates itself; a
+          # development build (task run) does not.
+          FLAGS: -tags production -trimpath -buildvcs=false -ldflags="-w -s -H windowsgui {{.LDFLAGS_VERSION}}"
 
   exe:
     internal: true

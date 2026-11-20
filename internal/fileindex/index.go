@@ -47,11 +47,17 @@ type volume struct {
 	casedOff []uint32
 
 	// byRec maps a record number to its first entry plus one; 0 is none.
-	// links holds the further entries of a file with several hard links.
-	byRec []uint32
+	// It is kept in pages of recPage records, and a page none of whose
+	// records is indexed is nil, so the stretches of the file table that
+	// hold excluded folders or no files take no room. links holds the
+	// further entries of a file with several hard links.
+	byRec []*[recPage]uint32
 	links map[uint32][]uint32
 	dead  int
 }
+
+// recPage is how many records a page of the lookup by record covers.
+const recPage = 1024
 
 func newVolume(guid, mount string, journalID uint64) *volume {
 	return &volume{guid: guid, mount: mount, journalID: journalID, links: map[uint32][]uint32{}}
@@ -125,43 +131,68 @@ func grow[S ~[]E, E any](s S, n int) S {
 	return t
 }
 
-// reindex rebuilds the lookup by record from the live entries.
+// reindex rebuilds the lookup by record from the live entries. It reuses
+// the pages it has and lets go of those left empty.
 func (v *volume) reindex() {
-	top := uint32(0)
-	for i, r := range v.rec {
-		if v.flags[i]&flagDead == 0 {
-			top = max(top, r)
+	for _, p := range v.byRec {
+		if p != nil {
+			clear(p[:])
 		}
 	}
-	v.byRec, v.links = make([]uint32, top+1), map[uint32][]uint32{}
+	v.links = map[uint32][]uint32{}
 	for i := range v.off {
 		if v.flags[i]&flagDead == 0 {
 			v.index(i)
 		}
 	}
+	used := 0
+	for k, p := range v.byRec {
+		if p == nil {
+			continue
+		}
+		if slices.ContainsFunc(p[:], func(e uint32) bool { return e != 0 }) {
+			used = k + 1
+		} else {
+			v.byRec[k] = nil
+		}
+	}
+	v.byRec = v.byRec[:used]
 }
 
 // index records entry i under its record number.
 func (v *volume) index(i int) {
 	r := v.rec[i]
-	if int(r) >= len(v.byRec) {
-		grown := make([]uint32, max(int(r)+1, len(v.byRec)*5/4))
-		copy(grown, v.byRec)
-		v.byRec = grown
+	k := int(r / recPage)
+	for len(v.byRec) <= k {
+		v.byRec = append(v.byRec, nil)
 	}
-	if v.byRec[r] == 0 {
-		v.byRec[r] = uint32(i) + 1
+	if v.byRec[k] == nil {
+		v.byRec[k] = new([recPage]uint32)
+	}
+	if s := &v.byRec[k][r%recPage]; *s == 0 {
+		*s = uint32(i) + 1
 	} else {
 		v.links[r] = append(v.links[r], uint32(i))
 	}
 }
 
+// slot returns where a record's first entry is kept, or nil when no
+// record of its page is indexed.
+func (v *volume) slot(rec uint32) *uint32 {
+	k := int(rec / recPage)
+	if k >= len(v.byRec) || v.byRec[k] == nil {
+		return nil
+	}
+	return &v.byRec[k][rec%recPage]
+}
+
 // lookup returns the first entry of a record, or -1.
 func (v *volume) lookup(rec uint32) int {
-	if int(rec) >= len(v.byRec) {
+	s := v.slot(rec)
+	if s == nil {
 		return -1
 	}
-	return int(v.byRec[rec]) - 1
+	return int(*s) - 1
 }
 
 // remove marks every entry of a record dead. A sequence number other than
@@ -176,7 +207,7 @@ func (v *volume) remove(rec uint32, seq uint16) {
 		v.flags[i] |= flagDead
 		v.dead++
 	}
-	v.byRec[rec] = 0
+	*v.slot(rec) = 0
 	delete(v.links, rec)
 }
 
@@ -198,6 +229,18 @@ func (v *volume) set(rec uint32, seq uint16, flags byte, links []link, ex *exclu
 			v.flags[i] |= flagExcluded
 		}
 	}
+}
+
+// indexedFolder reports whether a record is a folder in the index whose
+// contents are indexed: not excluded.
+func (v *volume) indexedFolder(rec uint32) bool {
+	i := v.lookup(rec)
+	return i >= 0 && v.flags[i]&(flagDir|flagExcluded) == flagDir
+}
+
+// settle compacts the volume once a quarter of its entries are dead,
+// after a batch of changes.
+func (v *volume) settle(ex *excludes) {
 	if v.dead > 4096 && v.dead > len(v.off)/4 {
 		v.compact(ex)
 	}
@@ -314,31 +357,49 @@ func (v *volume) compact(ex *excludes) {
 	v.reindex()
 }
 
-// path returns entry i's full path, folded or not. ok is false when the entry can no longer be reached, such as a
-// file whose folder moved into an excluded folder.
+// path returns entry i's full path, folded or not. ok is false when the
+// entry can no longer be reached, such as a file whose folder moved into an
+// excluded folder.
 func (v *volume) path(i int, folded bool) (path string, ok bool) {
-	parts := [][]byte{v.name(i, folded)}
-	for p := v.parent[i]; p != rootRecord; {
+	b, ok := v.appendPath(nil, i, folded)
+	return string(b), ok
+}
+
+// appendPath appends entry i's full path to dst, like path. It measures
+// the path first and then fills it in from the name up, so a search can
+// build the path of every entry it tests in one buffer.
+func (v *volume) appendPath(dst []byte, i int, folded bool) ([]byte, bool) {
+	size := len(v.name(i, true))
+	for p, d := v.parent[i], 1; p != rootRecord; d++ {
 		k := v.lookup(p)
-		if k < 0 || v.flags[k]&(flagDead|flagExcluded) != 0 || len(parts) > maxDepth {
-			return "", false
+		if k < 0 || v.flags[k]&(flagDead|flagExcluded) != 0 || d > maxDepth {
+			return dst, false
 		}
-		parts = append(parts, v.name(k, folded))
+		// A folded name is as long as the name as written.
+		size += len(v.name(k, true)) + 1
 		p = v.parent[k]
 	}
-	var b strings.Builder
-	mount := v.mount
+	dst = slices.Grow(dst, len(v.mount)+size)
 	if folded {
-		mount = string(appendFolded(nil, []byte(mount)))
+		dst = appendFolded(dst, []byte(v.mount))
+	} else {
+		dst = append(dst, v.mount...)
 	}
-	b.WriteString(mount)
-	for k := len(parts) - 1; k >= 0; k-- {
-		b.Write(parts[k])
-		if k > 0 {
-			b.WriteByte('\\')
+	end := len(dst) + size
+	dst = dst[:end]
+	for k := i; ; {
+		name := v.name(k, folded)
+		end -= len(name)
+		copy(dst[end:], name)
+		p := v.parent[k]
+		if p == rootRecord {
+			break
 		}
+		end--
+		dst[end] = '\\'
+		k = v.lookup(p)
 	}
-	return b.String(), true
+	return dst, true
 }
 
 // depth returns how many folders down entry i is, and whether it can be

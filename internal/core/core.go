@@ -98,7 +98,7 @@ func Run() error {
 		translator,
 		launcher.New(store, log, launcherTranslator{translator}),
 		screenshot.New(store, log, c.reader, screenshotTranslator{translator}),
-		desktop.New(store, log),
+		desktop.New(store, log, filepath.Join(configDir, appName, "desktop-snapshots")),
 	}
 	c.hotkeys = hotkey.NewManager(hotkey.NewSystem(), store, log)
 	c.hotkeys.Define(coreOwner, appName, []hotkey.Def{
@@ -106,7 +106,7 @@ func Run() error {
 	})
 	c.modules = module.NewRegistry(module.Context{Log: log}, store, c.hotkeys, modules)
 
-	err = ui.Run(ui.Options{ID: bundleID, OnSecondInstance: func() { c.dashboard.open() }}, func() {
+	err = ui.Run(ui.Options{ID: bundleID, OnSecondInstance: func() { c.dashboard.open() }, Log: log}, func() {
 		c.dashboard = newDashboard(c)
 		c.setupTray()
 		c.hotkeys.Activate(coreOwner)

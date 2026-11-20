@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"image"
 	"image/png"
 	"os/exec"
@@ -40,19 +41,23 @@ const (
 
 // Applications lists the apps of the Start menu, Store apps included. On
 // Windows an app's ID is its AppsFolder ID.
-func Applications() []App {
+func Applications() ([]App, error) {
 	cmd := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", powershellStartApps)
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: createNoWindow}
 	out, err := cmd.Output()
 	if err != nil {
-		return nil
+		var exit *exec.ExitError
+		if errors.As(err, &exit) && len(exit.Stderr) > 0 {
+			err = fmt.Errorf("%w: %s", err, bytes.TrimSpace(exit.Stderr))
+		}
+		return nil, fmt.Errorf("run Get-StartApps: %w", err)
 	}
 	var entries []struct {
 		Name  string
 		AppID string
 	}
-	if json.Unmarshal(bytes.TrimPrefix(out, []byte("\xef\xbb\xbf")), &entries) != nil {
-		return nil
+	if err := json.Unmarshal(bytes.TrimPrefix(out, []byte("\xef\xbb\xbf")), &entries); err != nil {
+		return nil, fmt.Errorf("read Get-StartApps: %w", err)
 	}
 	apps := make([]App, 0, len(entries))
 	for _, e := range entries {
@@ -61,7 +66,7 @@ func Applications() []App {
 		}
 		apps = append(apps, App{ID: e.AppID, Name: e.Name})
 	}
-	return apps
+	return apps, nil
 }
 
 // isUninstaller reports whether a Start menu entry only removes a program.

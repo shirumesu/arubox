@@ -77,20 +77,26 @@ const (
 type Module struct {
 	store Store
 	log   *slog.Logger
+	snaps string // the folder of layout snapshots
 
 	mu     sync.Mutex
-	stored stored
-	view   *view // nil while disabled
+	stored stored // its layout is the module's own, never the view's
+	view   *view  // nil while disabled
+	// snapDay is the day a snapshot was last taken or found, as its file
+	// is named; snapErr is why taking it failed.
+	snapDay string
+	snapErr string
 }
 
-// New creates the module. It does nothing until enabled.
-func New(store Store, log *slog.Logger) *Module {
+// New creates the module, keeping layout snapshots in the folder snaps.
+// It does nothing until enabled.
+func New(store Store, log *slog.Logger, snaps string) *Module {
 	s := defaultStored()
 	if err := store.ModuleSettings(id, &s); err != nil {
 		log.Warn("desktop settings unreadable, using defaults", "error", err)
 		s = defaultStored()
 	}
-	return &Module{store: store, log: log, stored: s}
+	return &Module{store: store, log: log, snaps: snaps, stored: s}
 }
 
 // Info describes the module.
@@ -109,7 +115,9 @@ func (m *Module) Hotkeys() []hotkey.Def { return nil }
 // Enable takes over the desktop.
 func (m *Module) Enable(module.Context) error {
 	m.mu.Lock()
+	m.snapshot(m.stored.Layout)
 	s := m.stored
+	s.Layout = s.Layout.clone()
 	m.mu.Unlock()
 	v, err := startView(m, s)
 	if err != nil {

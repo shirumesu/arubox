@@ -139,7 +139,12 @@ func askHelper(kind string, size int, target string) []byte {
 				return nil
 			}
 		}
-		reply, err := exchange(kind, size, target)
+		reply, err := exchangeWithin(kind, size, target)
+		if errors.Is(err, errHelperTimeout) {
+			// Asking again would hang again.
+			killIconHelper()
+			return nil
+		}
 		if err == nil {
 			h.uses++
 			uses := h.uses
@@ -187,14 +192,44 @@ func startIconHelper() error {
 // maxReply bounds a reply: a 256-pixel thumbnail is 256 KB.
 const maxReply = 16 << 20
 
-// exchange sends one request and reads its reply. iconHelper.mu must be
+// helperTimeout bounds the wait for a reply. A thumbnail handler can hang,
+// as on a file of a share gone offline, and every request waits behind it,
+// the launcher's too.
+const helperTimeout = 10 * time.Second
+
+var errHelperTimeout = errors.New("icon helper did not reply in time")
+
+// exchangeWithin is exchange, giving up after helperTimeout, when the
+// helper is to be killed, which ends the exchange. iconHelper.mu must be
 // held.
-func exchange(kind string, size int, target string) ([]byte, error) {
-	if _, err := fmt.Fprintf(iconHelper.in, "%s\t%d\t%s\n", kind, size, target); err != nil {
+func exchangeWithin(kind string, size int, target string) ([]byte, error) {
+	type result struct {
+		reply []byte
+		err   error
+	}
+	done := make(chan result, 1)
+	in, out := iconHelper.in, iconHelper.out
+	go func() {
+		reply, err := exchange(in, out, kind, size, target)
+		done <- result{reply, err}
+	}()
+	timer := time.NewTimer(helperTimeout)
+	defer timer.Stop()
+	select {
+	case r := <-done:
+		return r.reply, r.err
+	case <-timer.C:
+		return nil, errHelperTimeout
+	}
+}
+
+// exchange sends one request on the helper's pipes and reads its reply.
+func exchange(in io.Writer, out *bufio.Reader, kind string, size int, target string) ([]byte, error) {
+	if _, err := fmt.Fprintf(in, "%s\t%d\t%s\n", kind, size, target); err != nil {
 		return nil, err
 	}
 	var n uint32
-	if err := binary.Read(iconHelper.out, binary.LittleEndian, &n); err != nil {
+	if err := binary.Read(out, binary.LittleEndian, &n); err != nil {
 		return nil, err
 	}
 	if n == 0 {
@@ -204,10 +239,24 @@ func exchange(kind string, size int, target string) ([]byte, error) {
 		return nil, errors.New("icon helper sent " + strconv.Itoa(int(n)) + " bytes")
 	}
 	reply := make([]byte, n)
-	if _, err := io.ReadFull(iconHelper.out, reply); err != nil {
+	if _, err := io.ReadFull(out, reply); err != nil {
 		return nil, err
 	}
 	return reply, nil
+}
+
+// killIconHelper ends a helper that hangs at once; once it is gone, its
+// pipes close, which ends the exchange still waiting on it. iconHelper.mu
+// must be held.
+func killIconHelper() {
+	h := &iconHelper
+	_ = h.in.Close()
+	cmd := h.cmd
+	h.cmd, h.in, h.out = nil, nil, nil
+	go func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	}()
 }
 
 // stopIconHelper ends the helper: closing its stdin ends its loop.

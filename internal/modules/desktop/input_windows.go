@@ -624,6 +624,11 @@ func (v *view) toggleRolled(g *boxGeo) {
 		to = g.m.title
 	}
 	v.animateHeight(g, to)
+	if !b.Rolled {
+		// The icons below a box unrolled for good make way for it.
+		v.arrange()
+		v.invalidateAll()
+	}
 	v.save()
 }
 
@@ -653,7 +658,7 @@ func (v *view) wheel(e platform.PointerEvent) {
 	visible := (g.full.Height - g.m.title - g.m.pad) / g.m.scale
 	limit := math.Max(0, g.contentH/g.m.scale-visible)
 	v.scroll[g.box.ID] = math.Max(0, math.Min(limit, v.scroll[g.box.ID]-e.Wheel*step))
-	v.arrange()
+	v.layoutBox(g)
 	v.invalidate(g.rect)
 }
 
@@ -681,6 +686,7 @@ func (v *view) showPortal(boxID string, p *portal) {
 	}
 	v.scroll[boxID] = 0
 	v.loadPortal(p)
+	v.pruneIcons()
 	v.watch()
 	v.arrange()
 	if g := v.geoOf(boxID); g != nil {
@@ -767,6 +773,7 @@ func (v *view) deleteBox(id string) {
 		delete(a.Boxes, id)
 	}
 	delete(v.portals, id)
+	v.pruneIcons()
 	delete(v.scroll, id)
 	if v.selBox == id {
 		v.selBox = ""
@@ -789,6 +796,7 @@ const (
 	menuNewBox
 	menuNewPortal
 	menuRefresh
+	menuRelayout
 	menuDisplay
 	menuPersonalize
 	menuRenameBox
@@ -815,9 +823,15 @@ func (v *view) contextMenu(h hit, x, y float64, extended bool) {
 		v.pending = &placement{x: x, y: y, until: time.Now().Add(10 * time.Second)}
 		own := []platform.MenuItem{
 			{ID: menuNewBox, Text: "新建盒子"}, {ID: menuNewPortal, Text: "新建文件夹入口…"}, {Separator: true},
-			{ID: menuRefresh, Text: "刷新"}, {ID: menuDisplay, Text: "显示设置"}, {ID: menuPersonalize, Text: "个性化"},
+			{ID: menuRefresh, Text: "刷新"},
 		}
-		switch v.d.FolderMenu(platform.DesktopFolder(), own, x, y) {
+		if v.layout.source(v.arr, func(*Arrangement) bool { return true }) != nil {
+			own = append(own, platform.MenuItem{ID: menuRelayout, Text: "按其他分辨率的布局重排"})
+		}
+		own = append(own, platform.MenuItem{ID: menuDisplay, Text: "显示设置"}, platform.MenuItem{ID: menuPersonalize, Text: "个性化"})
+		chosen := v.d.FolderMenu(platform.DesktopFolder(), own, x, y)
+		v.keepPending(chosen)
+		switch chosen {
 		case menuNewBox:
 			v.createBox(platform.Box{X: x, Y: y}, "")
 		case menuNewPortal:
@@ -826,6 +840,8 @@ func (v *view) contextMenu(h hit, x, y float64, extended bool) {
 			}
 		case menuRefresh:
 			v.refresh()
+		case menuRelayout:
+			v.relayout()
 		case menuDisplay:
 			_ = platform.OpenFile("ms-settings:display")
 		case menuPersonalize:
@@ -834,9 +850,30 @@ func (v *view) contextMenu(h hit, x, y float64, extended bool) {
 	}
 }
 
+// keepPending keeps the place a folder menu was shown at for the items to
+// come only when one of File Explorer's own entries, such as New or
+// Paste, was chosen: a dismissed menu, or one of the module's entries,
+// makes none.
+func (v *view) keepPending(chosen int) {
+	if chosen != platform.MenuShell {
+		v.pending = nil
+	}
+}
+
+// relayout forgets where everything is on these monitors, so it is all
+// carried over again from the monitors most like these.
+func (v *view) relayout() {
+	clear(v.arr.Boxes)
+	clear(v.arr.Icons)
+	v.arr.Edited = 0
+	v.arrange()
+	v.invalidateAll()
+	v.save()
+}
+
 func (v *view) refresh() {
 	v.dropIcons()
-	v.loadItems()
+	v.loadItems(everyPortal)
 	v.arrange()
 	v.invalidateAll()
 }
@@ -863,8 +900,7 @@ func (v *view) itemMenu(h hit, x, y float64, extended bool) {
 		keys := v.selectedKeys()
 		v.clearSelection()
 		v.selBox = ""
-		v.placeLoose(keys, at.X+at.Width+1, at.Y)
-		for _, k := range keys {
+		for _, k := range v.placeLoose(keys, at.X+at.Width+1, at.Y) {
 			v.selected[k] = true
 		}
 		v.invalidateAll()
@@ -907,6 +943,7 @@ func (v *view) boxMenu(g *boxGeo, x, y float64, background bool) {
 		// New items and pasted ones land in this box.
 		v.pending = &placement{box: id, x: x, y: y, mark: v.markAt(id, x, y), until: time.Now().Add(10 * time.Second)}
 		chosen = v.d.FolderMenu(platform.DesktopFolder(), own, x, y)
+		v.keepPending(chosen)
 	default:
 		chosen = v.d.Menu(own, x, y)
 	}

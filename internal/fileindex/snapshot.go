@@ -59,13 +59,26 @@ func writeSnapshot(w io.Writer, excludeList []string, vols []*volume) error {
 	}
 	for _, v := range vols {
 		v.mu.RLock()
-		err := writeVolume(w, v)
+		s := v.still()
 		v.mu.RUnlock()
-		if err != nil {
+		if err := writeVolume(w, s); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// still returns the volume as it is now, to be written without holding its
+// lock, which changes and searches would wait on while the disk is written.
+// Changes only append past the arrays' ends or replace the arrays with new
+// ones, which leaves what is returned as it was, except the flags they set
+// in place, which are copied.
+func (v *volume) still() *volume {
+	return &volume{
+		guid: v.guid, mount: v.mount, journalID: v.journalID, nextUSN: v.nextUSN,
+		names: v.names, off: v.off, parent: v.parent, rec: v.rec, seq: v.seq, flags: slices.Clone(v.flags),
+		cased: v.cased, casedAt: v.casedAt, casedOff: v.casedOff,
+	}
 }
 
 func writeVolume(w io.Writer, v *volume) error {

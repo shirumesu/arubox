@@ -688,7 +688,7 @@ func (v *ntfsVolume) follow(idx byte, id uint64, start int64, send func(byte, []
 func (v *ntfsVolume) sendChanges(idx byte, next int64, recs []byte, send func(byte, []byte) error) error {
 	le := binary.LittleEndian
 	var order []uint64
-	deleted := map[uint64]bool{}
+	deleted, moved := map[uint64]bool{}, map[uint64]bool{}
 	for len(recs) >= 8 {
 		length := int(le.Uint32(recs))
 		if length < 8 || length > len(recs) {
@@ -719,6 +719,9 @@ func (v *ntfsVolume) sendChanges(idx byte, next int64, recs []byte, send func(by
 			order = append(order, frn)
 		}
 		deleted[frn] = reason&reasonFileDelete != 0
+		if reason&reasonRenameNewName != 0 {
+			moved[frn] = true
+		}
 	}
 	if len(order) == 0 {
 		return nil
@@ -728,12 +731,18 @@ func (v *ntfsVolume) sendChanges(idx byte, next int64, recs []byte, send func(by
 	e.u64(uint64(next))
 	for _, frn := range order {
 		if !deleted[frn] {
+			// A file that cannot be read is not known to be gone: the
+			// volume is indexed again rather than the file dropped.
 			flags, links, alive, err := v.current(frn)
-			if errors.Is(err, errStopped) {
-				return err
+			if err != nil {
+				return fmt.Errorf("read file record %d: %w", recordNumber(frn), err)
 			}
-			if alive && err == nil {
-				e.u8(changeSet)
+			if alive {
+				if moved[frn] {
+					e.u8(changeMoved)
+				} else {
+					e.u8(changeSet)
+				}
 				e.u64(frn)
 				e.u8(flags)
 				e.u8(byte(min(len(links), 255)))

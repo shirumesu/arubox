@@ -261,9 +261,11 @@ type DesktopHandler interface {
 	// DropLeft reports a drag that left the point last given to DropAt
 	// without dropping: it went off the surface or was given up.
 	DropLeft()
-	// ShellChanged reports that watched folders changed; renames pairs
-	// old and new parsing names of items renamed.
-	ShellChanged(renames [][2]string)
+	// ShellChanged reports that watched folders changed. changed holds
+	// the parsing names of the items changed, which may be the folders
+	// themselves; it is empty, or holds "", when they are not known.
+	// renames pairs old and new parsing names of items renamed.
+	ShellChanged(changed []string, renames [][2]string)
 	// EditDone ends an Edit: ok is false when it was cancelled.
 	EditDone(text string, ok bool)
 }
@@ -518,6 +520,7 @@ var surfaceOf sync.Map
 func destroySurfaces(surfaces []*surface) {
 	for _, s := range surfaces {
 		procRevokeDragDrop.Call(s.hwnd)
+		s.drop.release()
 		surfaceOf.Delete(s.hwnd)
 		procDestroyWindow.Call(s.hwnd)
 		s.canvas.release()
@@ -1096,6 +1099,9 @@ func surfaceWndProc(hwnd, m, w, l uintptr) uintptr {
 		// File Explorer closed the desktop under the layer, as when it
 		// restarts; lay it again once the desktop is back.
 		if !d.detaching {
+			// OLE keeps its reference to the drop target unless the
+			// window revokes it before it goes.
+			procRevokeDragDrop.Call(hwnd)
 			surfaceOf.Delete(hwnd)
 			procSetTimer.Call(d.host, timerReattach, 500, 0)
 		}

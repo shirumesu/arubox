@@ -1,6 +1,10 @@
 package desktop
 
-import "math"
+import (
+	"maps"
+	"math"
+	"slices"
+)
 
 // Rect is a rectangle; its unit depends on where it is used.
 type Rect struct {
@@ -64,24 +68,60 @@ type Cell struct {
 }
 
 // Arrangement is where everything is for one set of monitors, so a laptop
-// keeps one layout on its own screen and another when docked.
+// keeps one layout on its own screen and another when docked. A box or
+// icon an arrangement has no place for gets one worked out from the
+// arrangement whose monitors are most like these.
 type Arrangement struct {
 	Boxes map[string]Place `json:"boxes"`
 	Icons map[string]Cell  `json:"icons"`
+	// Monitors are the monitors as last seen, so places can be carried
+	// over to other monitors. Arrangements saved by older versions lack
+	// them until their monitors are seen again.
+	Monitors []Monitor `json:"monitors,omitempty"`
 	// Used is when this set of monitors was last seen, in Unix seconds.
 	Used int64 `json:"used"`
+	// Edited is when the user last moved something here, in Unix seconds.
+	Edited int64 `json:"edited,omitempty"`
 }
 
 // Layout is everything the module keeps about the desktop.
 type Layout struct {
 	Boxes        []Box                   `json:"boxes"`
 	Arrangements map[string]*Arrangement `json:"arrangements"`
+	// Files are the desktop's files' IDs by parsing name, as last seen,
+	// so a file renamed while no one was watching, by another program
+	// or while arubox was not running, keeps its place.
+	Files map[string]string `json:"files,omitempty"`
+}
+
+// clone returns a copy sharing nothing with l, so the view can change
+// its layout while the module saves another.
+func (l Layout) clone() Layout {
+	c := Layout{Boxes: slices.Clone(l.Boxes), Files: maps.Clone(l.Files)}
+	for i := range c.Boxes {
+		c.Boxes[i].Items = slices.Clone(c.Boxes[i].Items)
+	}
+	if l.Arrangements != nil {
+		c.Arrangements = make(map[string]*Arrangement, len(l.Arrangements))
+		for k, a := range l.Arrangements {
+			n := *a
+			n.Boxes, n.Icons, n.Monitors = maps.Clone(a.Boxes), maps.Clone(a.Icons), slices.Clone(a.Monitors)
+			c.Arrangements[k] = &n
+		}
+	}
+	return c
 }
 
 // Monitor is a display, in physical pixels of the virtual screen.
 type Monitor struct {
-	ID     string
-	Bounds Rect
-	Work   Rect // the bounds without the taskbar
-	Scale  float64
+	ID     string  `json:"id"`
+	Bounds Rect    `json:"bounds"`
+	Work   Rect    `json:"work"` // the bounds without the taskbar
+	Scale  float64 `json:"scale"`
+}
+
+// workDIP is the monitor's work area in DIPs from its top left corner,
+// the space boxes are carried over in.
+func (m Monitor) workDIP() Rect {
+	return Rect{(m.Work.X - m.Bounds.X) / m.Scale, (m.Work.Y - m.Bounds.Y) / m.Scale, m.Work.W / m.Scale, m.Work.H / m.Scale}
 }

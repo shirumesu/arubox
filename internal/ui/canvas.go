@@ -8,6 +8,7 @@ import (
 	"golang.org/x/sys/windows"
 
 	"github.com/shirumesu/arubox/internal/design"
+	"github.com/shirumesu/arubox/internal/pixellock"
 )
 
 // Color is a colour as the design tokens define it.
@@ -143,7 +144,7 @@ func textFormat(k formatKey) comObject {
 		family = design.Fonts[0]
 	}
 	var f comObject
-	if !succeeded(call(dwFactory, slotDWCreateTextFormat, utf16Ptr(family), 0, uintptr(k.weight), 0, dwriteStretchNormal,
+	if !succeeded(callf(dwFactory, slotDWCreateTextFormat, "iiiiifii", utf16Ptr(family), 0, uintptr(k.weight), 0, dwriteStretchNormal,
 		f32(k.size), utf16Ptr("zh-CN"), uintptr(unsafe.Pointer(&f)))) {
 		return nil
 	}
@@ -163,7 +164,7 @@ func textFormat(k formatKey) comObject {
 		}
 	}
 	if k.lineHeight > 0 {
-		call(f, slotTFSetLineSpacing, dwriteLineSpacingUniform, f32(k.lineHeight), f32(k.lineHeight*0.8))
+		callf(f, slotTFSetLineSpacing, "iff", dwriteLineSpacingUniform, f32(k.lineHeight), f32(k.lineHeight*0.8))
 	}
 	formats[k] = f
 	return f
@@ -198,7 +199,7 @@ func textLayout(s string, t Text, w, h float64) comObject {
 		return nil
 	}
 	var l comObject
-	if !succeeded(call(dwFactory, slotDWCreateTextLayout, uintptr(unsafe.Pointer(&u[0])), uintptr(len(u)-1), uintptr(f),
+	if !succeeded(callf(dwFactory, slotDWCreateTextLayout, "iiiffi", uintptr(unsafe.Pointer(&u[0])), uintptr(len(u)-1), uintptr(f),
 		f32(math.Max(w, 0)), f32(math.Max(h, 0)), uintptr(unsafe.Pointer(&l)))) {
 		return nil
 	}
@@ -299,7 +300,7 @@ func (c *Canvas) StrokeRound(r Rect, radius, width float64, col Color) {
 		return
 	}
 	d := d2dRoundedRect{d2r(r.Inset(width / 2)), float32(radius), float32(radius)}
-	call(c.target, slotRTDrawRoundedRectangle, uintptr(unsafe.Pointer(&d)), c.color(col), f32(width), 0)
+	callf(c.target, slotRTDrawRoundedRectangle, "iifi", uintptr(unsafe.Pointer(&d)), c.color(col), f32(width), 0)
 }
 
 // Stroke outlines a rectangle inside its edge; dashed draws it dashed.
@@ -309,12 +310,12 @@ func (c *Canvas) Stroke(r Rect, width float64, col Color, dashed bool) {
 	if dashed {
 		style = uintptr(dashStroke)
 	}
-	call(c.target, slotRTDrawRectangle, uintptr(unsafe.Pointer(&d)), c.color(col), f32(width), style)
+	callf(c.target, slotRTDrawRectangle, "iifi", uintptr(unsafe.Pointer(&d)), c.color(col), f32(width), style)
 }
 
 // Line draws a line with round ends.
 func (c *Canvas) Line(a, b Point, width float64, col Color) {
-	call(c.target, slotRTDrawLine, point2F(a.X, a.Y), point2F(b.X, b.Y), c.color(col), f32(width), uintptr(roundStroke))
+	callf(c.target, slotRTDrawLine, "ppifi", point2F(a.X, a.Y), point2F(b.X, b.Y), c.color(col), f32(width), uintptr(roundStroke))
 }
 
 // FillEllipse fills an ellipse inside r.
@@ -327,7 +328,7 @@ func (c *Canvas) FillEllipse(r Rect, col Color) {
 func (c *Canvas) StrokeEllipse(r Rect, width float64, col Color) {
 	r = r.Inset(width / 2)
 	e := d2dEllipse{float32(r.X + r.W/2), float32(r.Y + r.H/2), float32(r.W / 2), float32(r.H / 2)}
-	call(c.target, slotRTDrawEllipse, uintptr(unsafe.Pointer(&e)), c.color(col), f32(width), 0)
+	callf(c.target, slotRTDrawEllipse, "iifi", uintptr(unsafe.Pointer(&e)), c.color(col), f32(width), 0)
 }
 
 // path builds a geometry through points; closed joins the last to the
@@ -349,7 +350,7 @@ func path(points []Point, closed, filled bool) comObject {
 	if filled {
 		begin = d2dFigureBeginFilled
 	}
-	call(sink, slotSinkBeginFigure, point2F(points[0].X, points[0].Y), begin)
+	callf(sink, slotSinkBeginFigure, "pi", point2F(points[0].X, points[0].Y), begin)
 	rest := make([]float32, 0, 2*(len(points)-1))
 	for _, p := range points[1:] {
 		rest = append(rest, float32(p.X), float32(p.Y))
@@ -372,7 +373,7 @@ func (c *Canvas) Polyline(points []Point, width float64, col Color) {
 		return
 	}
 	defer release(g)
-	call(c.target, slotRTDrawGeometry, uintptr(g), c.color(col), f32(width), uintptr(roundStroke))
+	callf(c.target, slotRTDrawGeometry, "iifi", uintptr(g), c.color(col), f32(width), uintptr(roundStroke))
 }
 
 // FillPolygon fills the polygon through points.
@@ -392,7 +393,7 @@ func (c *Canvas) Text(r Rect, s string, t Text) {
 		return
 	}
 	defer release(l)
-	call(c.target, slotRTDrawTextLayout, point2F(r.X, r.Y), uintptr(l), c.color(t.Color), d2dDrawTextEnableColorFont|d2dDrawTextClip)
+	callf(c.target, slotRTDrawTextLayout, "piii", point2F(r.X, r.Y), uintptr(l), c.color(t.Color), d2dDrawTextEnableColorFont|d2dDrawTextClip)
 }
 
 // PushClip limits drawing to r until PopClip.
@@ -477,10 +478,10 @@ func (c *Canvas) bitmapOf(img *Image) comObject {
 	// them would land in the software rasterizer's pool, which keeps its
 	// buffers for the life of the process.
 	props := d2dBitmapProperties{PixelFormat: d2dPixelFormat{dxgiFormatB8G8R8A8, d2dAlphaPremultiplied}, DpiX: 96, DpiY: 96}
-	lock := newPixelLock(img)
+	lock := pixellock.New(img.Pixels, img.Width, img.Height)
 	var b comObject
-	hr := call(c.target, slotRTCreateSharedBitmap, uintptr(unsafe.Pointer(&iidIWICBitmapLock)), lock, uintptr(unsafe.Pointer(&props)), uintptr(unsafe.Pointer(&b)))
-	lockRelease(lock)
+	hr := call(c.target, slotRTCreateSharedBitmap, uintptr(unsafe.Pointer(&pixellock.IID)), lock, uintptr(unsafe.Pointer(&props)), uintptr(unsafe.Pointer(&b)))
+	pixellock.Release(lock)
 	if !succeeded(hr) {
 		return nil
 	}
@@ -514,7 +515,7 @@ func (c *Canvas) Image(img *Image, dst, src Rect, opacity float64, smooth bool) 
 		s = d2r(src)
 		sp = uintptr(unsafe.Pointer(&s))
 	}
-	call(c.target, slotRTDrawBitmap, uintptr(b), uintptr(unsafe.Pointer(&d)), f32(opacity), mode, sp)
+	callf(c.target, slotRTDrawBitmap, "iifii", uintptr(b), uintptr(unsafe.Pointer(&d)), f32(opacity), mode, sp)
 }
 
 // Render draws with f into a new width×height image in physical pixels,
@@ -593,10 +594,10 @@ func TextRanges(r Rect, s string, t Text, start, end int) []Rect {
 	}
 	ms := make([]dwriteHitTestMetrics, 16)
 	var n uint32
-	call(l, slotTLHitTestTextRange, uintptr(start), uintptr(end-start), 0, 0, uintptr(unsafe.Pointer(&ms[0])), uintptr(len(ms)), uintptr(unsafe.Pointer(&n)))
+	callf(l, slotTLHitTestTextRange, "iiffiii", uintptr(start), uintptr(end-start), f32(0), f32(0), uintptr(unsafe.Pointer(&ms[0])), uintptr(len(ms)), uintptr(unsafe.Pointer(&n)))
 	if int(n) > len(ms) {
 		ms = make([]dwriteHitTestMetrics, n)
-		call(l, slotTLHitTestTextRange, uintptr(start), uintptr(end-start), 0, 0, uintptr(unsafe.Pointer(&ms[0])), uintptr(len(ms)), uintptr(unsafe.Pointer(&n)))
+		callf(l, slotTLHitTestTextRange, "iiffiii", uintptr(start), uintptr(end-start), f32(0), f32(0), uintptr(unsafe.Pointer(&ms[0])), uintptr(len(ms)), uintptr(unsafe.Pointer(&n)))
 	}
 	out := make([]Rect, 0, n)
 	for _, m := range ms[:min(int(n), len(ms))] {

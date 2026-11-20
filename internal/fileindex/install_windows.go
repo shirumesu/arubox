@@ -58,7 +58,8 @@ func installedPath() (string, error) {
 }
 
 // install copies this executable to the install folder and sets it up as a
-// service that starts with Windows, replacing an older one.
+// service, replacing an older one. The service starts when the user's
+// program needs it, not with Windows, so the user is let start it.
 func install(sid string) error {
 	if _, err := windows.StringToSid(sid); err != nil {
 		return fmt.Errorf("bad user %q: %w", sid, err)
@@ -93,7 +94,7 @@ func install(sid string) error {
 	}
 	config := mgr.Config{
 		ServiceType:  windows.SERVICE_WIN32_OWN_PROCESS,
-		StartType:    mgr.StartAutomatic,
+		StartType:    mgr.StartManual,
 		ErrorControl: mgr.ErrorNormal,
 		DisplayName:  "arubox 文件索引",
 		Description:  "为 arubox 启动器提供即时的文件搜索。",
@@ -110,12 +111,40 @@ func install(sid string) error {
 		}
 		defer s.Close()
 	}
+	if err := letStart(s, sid); err != nil {
+		return err
+	}
 	restart := []mgr.RecoveryAction{{Type: mgr.ServiceRestart, Delay: 5 * time.Second}}
 	if err := s.SetRecoveryActions(restart, uint32((24 * time.Hour).Seconds())); err != nil {
 		return fmt.Errorf("set the service to restart: %w", err)
 	}
 	if err := s.Start(); err != nil {
 		return fmt.Errorf("start the service: %w", err)
+	}
+	return nil
+}
+
+// letStart gives the service the permissions a service has by default and
+// lets the user sid also start it: the program, which runs as that user
+// without administrator rights, starts it when it searches files.
+func letStart(s *mgr.Service, sid string) error {
+	// SY and BA have full control, IU and SU, interactive and service
+	// users, may query it; the user may query and start it, not stop it.
+	sd, err := windows.SecurityDescriptorFromString("D:" +
+		"(A;;CCLCSWRPWPDTLOCRRC;;;SY)" +
+		"(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)" +
+		"(A;;CCLCSWLOCRRC;;;IU)" +
+		"(A;;CCLCSWLOCRRC;;;SU)" +
+		"(A;;CCLCSWRPLOCRRC;;;" + sid + ")")
+	if err != nil {
+		return fmt.Errorf("the service's permissions: %w", err)
+	}
+	dacl, _, err := sd.DACL()
+	if err != nil {
+		return fmt.Errorf("the service's permissions: %w", err)
+	}
+	if err := windows.SetSecurityInfo(s.Handle, windows.SE_SERVICE, windows.DACL_SECURITY_INFORMATION, nil, nil, dacl, nil); err != nil {
+		return fmt.Errorf("let the user start the service: %w", err)
 	}
 	return nil
 }
@@ -206,6 +235,26 @@ func copyExecutable(target string) error {
 	return dst.Close()
 }
 
+// startService starts the installed service, which install lets the user
+// do. One already starting or running is left as it is.
+func startService() error {
+	m, err := windows.OpenSCManager(nil, nil, windows.SC_MANAGER_CONNECT)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = windows.CloseServiceHandle(m) }()
+	name, _ := windows.UTF16PtrFromString(serviceName)
+	h, err := windows.OpenService(m, name, windows.SERVICE_START)
+	if err != nil {
+		return fmt.Errorf("start the index service: %w", err)
+	}
+	defer func() { _ = windows.CloseServiceHandle(h) }()
+	if err := windows.StartService(h, 0, nil); err != nil && !errors.Is(err, windows.ERROR_SERVICE_ALREADY_RUNNING) {
+		return fmt.Errorf("start the index service: %w", err)
+	}
+	return nil
+}
+
 // serviceState is what the program can tell about the service without
 // administrator rights.
 type serviceState int
@@ -216,29 +265,33 @@ const (
 	serviceRunning
 )
 
-func queryService() (serviceState, error) {
+// queryService returns the service's state and the ID of its process, 0
+// when it has none.
+func queryService() (serviceState, uint32, error) {
 	m, err := windows.OpenSCManager(nil, nil, windows.SC_MANAGER_CONNECT)
 	if err != nil {
-		return serviceMissing, err
+		return serviceMissing, 0, err
 	}
 	defer func() { _ = windows.CloseServiceHandle(m) }()
 	name, _ := windows.UTF16PtrFromString(serviceName)
 	h, err := windows.OpenService(m, name, windows.SERVICE_QUERY_STATUS)
 	if errors.Is(err, windows.ERROR_SERVICE_DOES_NOT_EXIST) {
-		return serviceMissing, nil
+		return serviceMissing, 0, nil
 	}
 	if err != nil {
-		return serviceMissing, err
+		return serviceMissing, 0, err
 	}
 	defer func() { _ = windows.CloseServiceHandle(h) }()
-	var st windows.SERVICE_STATUS
-	if err := windows.QueryServiceStatus(h, &st); err != nil {
-		return serviceMissing, err
+	var st windows.SERVICE_STATUS_PROCESS
+	var needed uint32
+	if err := windows.QueryServiceStatusEx(h, windows.SC_STATUS_PROCESS_INFO,
+		(*byte)(unsafe.Pointer(&st)), uint32(unsafe.Sizeof(st)), &needed); err != nil {
+		return serviceMissing, 0, err
 	}
 	if st.CurrentState == windows.SERVICE_RUNNING {
-		return serviceRunning, nil
+		return serviceRunning, st.ProcessId, nil
 	}
-	return serviceStopped, nil
+	return serviceStopped, st.ProcessId, nil
 }
 
 var (

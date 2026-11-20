@@ -3,11 +3,11 @@ package launcher
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"image"
 	"image/draw"
 	"image/png"
 	"math"
+	"slices"
 	"strings"
 	"time"
 	"unicode"
@@ -254,6 +254,9 @@ type panel struct {
 	more        []Result
 	translation []Result
 	selected    int
+	// chosen is set once the user has moved the selection: results that
+	// arrive later then keep the same result selected, not the same row.
+	chosen bool
 	// copied shows that a value was copied, until the next key.
 	copied bool
 
@@ -303,6 +306,12 @@ func (p *panel) toggle() {
 	// Select the last query, so typing replaces it, and refresh its
 	// results: the apps or the keywords may have changed.
 	p.field.Focus, p.field.SelectAll = true, true
+	// The index loads while the panel opens and the user types, and stays
+	// until the panel has been closed for a while.
+	if err := p.m.useFiles(); err != nil {
+		p.m.log.Error("start file index", "error", err)
+	}
+	p.m.stopIdle()
 	p.search(p.field.Text, p.chip)
 	p.fit()
 	p.win.Show(true)
@@ -314,6 +323,7 @@ func (p *panel) hide() {
 		p.win.Hide()
 	}
 	p.releaseImages()
+	p.m.idleFiles()
 }
 
 // destroy closes the window, when the module is disabled.
@@ -379,7 +389,18 @@ func (p *panel) search(q string, c *chip) {
 				if n != p.seq || p.win == nil {
 					return
 				}
+				// Results come in above others, which would put another
+				// one under a selection the user made.
+				var keep *Result
+				if p.chosen {
+					keep = p.current(p.results())
+				}
 				set(r)
+				if keep != nil {
+					if i := slices.Index(p.results(), *keep); i >= 0 && i != p.selected {
+						p.selected, p.scrollToSel = i, true
+					}
+				}
 				p.win.Invalidate()
 			})
 		}))
@@ -388,7 +409,7 @@ func (p *panel) search(q string, c *chip) {
 	setTranslation := func(r []Result) { p.translation = r }
 	m := p.m
 
-	p.selected, p.resetScroll = 0, true
+	p.selected, p.chosen, p.resetScroll = 0, false, true
 	p.more, p.translation = nil, nil
 	if c != nil {
 		p.instant = nil
@@ -505,7 +526,7 @@ func (p *panel) current(rs []Result) *Result {
 func (p *panel) move(rs []Result, d int) {
 	if len(rs) > 0 {
 		p.selected = (p.selected + d + len(rs)) % len(rs)
-		p.scrollToSel = true
+		p.chosen, p.scrollToSel = true, true
 	}
 }
 
@@ -714,9 +735,12 @@ func (p *panel) drawList(f *ui.Frame, y, width float64, rs []Result) float64 {
 func (p *panel) drawRow(f *ui.Frame, i int, r ui.Rect, res Result) {
 	t := f.Theme
 	ev := f.Event()
-	resp := f.Interact(fmt.Sprintf("row%d", i), r)
+	// The row is named by its result, not its place: results that come in
+	// between the press and the release move the others down, and the
+	// click must not open what took the pressed one's place.
+	resp := f.Interact("row\x00"+res.Kind+"\x00"+res.Key+"\x00"+res.Title, r)
 	if resp.Hovered && ev.Kind == ui.EvMouseMove && p.selected != i {
-		p.selected = i
+		p.selected, p.chosen = i, true
 		f.Invalidate()
 	}
 	if resp.Clicked {

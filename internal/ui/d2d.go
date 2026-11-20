@@ -7,6 +7,8 @@ import (
 	"unsafe"
 
 	"golang.org/x/sys/windows"
+
+	"github.com/shirumesu/arubox/internal/floatcall"
 )
 
 // comObject is a COM interface pointer.
@@ -22,6 +24,16 @@ func call(o comObject, slot int, args ...uintptr) uintptr {
 	method := *(*uintptr)(unsafe.Add(vtable, uintptr(slot)*unsafe.Sizeof(uintptr(0))))
 	r, _, _ := syscall.SyscallN(method, append([]uintptr{uintptr(o)}, args...)...)
 	return r
+}
+
+// callf is call for a method that takes FLOAT or D2D1_POINT_2F arguments by
+// value. kinds has one letter per argument: 'i' for an integer or pointer,
+// 'f' for f32 and 'p' for point2F. Through call, such a method gets its
+// arguments in the wrong registers on ARM64.
+//
+//go:uintptrescapes
+func callf(o comObject, slot int, kinds string, args ...uintptr) uintptr {
+	return floatcall.Method(unsafe.Pointer(o), slot, kinds, args...)
 }
 
 func release(o comObject) {
@@ -52,7 +64,6 @@ const (
 	slotFactoryCreateWicBitmapRenderTarget = 13
 	slotFactoryCreateDCRenderTarget        = 16
 
-	slotRTCreateBitmap          = 4
 	slotRTCreateSharedBitmap    = 6
 	slotRTCreateSolidColorBrush = 8
 	slotRTDrawLine              = 15

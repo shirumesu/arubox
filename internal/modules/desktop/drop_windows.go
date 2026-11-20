@@ -229,8 +229,12 @@ func (v *view) Dropped(x, y float64, t platform.DropTarget) {
 			v.selBox = g.box.ID
 			v.arrange()
 		} else {
+			// Those there was no room for stay in their box, unselected.
 			v.selBox = ""
-			v.placeLoose(keys, x, y)
+			clear(v.selected)
+			for _, k := range v.placeLoose(keys, x, y) {
+				v.selected[k] = true
+			}
 		}
 		v.invalidateAll()
 		v.save()

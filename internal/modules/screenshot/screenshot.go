@@ -232,28 +232,20 @@ func (p picture) png(fast bool) ([]byte, error) {
 	return b.Bytes(), nil
 }
 
-// copyPicture puts a picture on the clipboard. It runs on a goroutine of
-// its own: encoding a large picture takes a moment.
-func (m *Module) copyPicture(p picture) {
+// copy puts the picture on the clipboard. Call it off the UI thread:
+// encoding a large picture takes a moment.
+func (p picture) copy() error {
 	data, err := p.png(true)
-	if err == nil {
-		err = platform.CopyImage(data)
-	}
 	if err != nil {
-		m.log.Warn("copy screenshot", "error", err)
+		return err
 	}
+	return platform.CopyImage(platform.Image(p), data)
 }
 
-// savePicture asks where to save a picture, as PNG or, by the name's
-// extension, JPEG. It runs on a goroutine of its own, as the dialog
-// blocks.
-func (m *Module) savePicture(p picture) {
-	if err := m.save(p); err != nil {
-		m.log.Warn("save screenshot", "error", err)
-	}
-}
-
-func (m *Module) save(p picture) error {
+// save asks where to save a picture, as PNG or, by the name's extension,
+// JPEG, and saves it there. It reports false when the dialog was
+// cancelled. Call it off the UI thread, as the dialog blocks.
+func (m *Module) save(p picture) (bool, error) {
 	m.mu.Lock()
 	dir := m.stored.SaveDir
 	m.mu.Unlock()
@@ -272,23 +264,23 @@ func (m *Module) save(p picture) error {
 		},
 	})
 	if err != nil || path == "" {
-		return err
+		return false, err
 	}
 	var data []byte
 	if ext := strings.ToLower(filepath.Ext(path)); ext == ".jpg" || ext == ".jpeg" {
 		var b bytes.Buffer
 		if err := jpeg.Encode(&b, p.rgba(), &jpeg.Options{Quality: jpegQuality}); err != nil {
-			return err
+			return false, err
 		}
 		data = b.Bytes()
 	} else if data, err = p.png(false); err != nil {
-		return err
+		return false, err
 	}
 	if err := os.WriteFile(path, data, 0o600); err != nil {
-		return fmt.Errorf("保存失败：%w", err)
+		return false, fmt.Errorf("保存失败：%w", err)
 	}
 	m.rememberDir(filepath.Dir(path))
-	return nil
+	return true, nil
 }
 
 func (m *Module) rememberDir(dir string) {

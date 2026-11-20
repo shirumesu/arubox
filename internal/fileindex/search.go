@@ -50,8 +50,9 @@ func (t *top) offer(h hit) {
 const checkEvery = 1 << 14
 
 // search finds the best limit entries of the volumes that match q, best
-// first, and returns their paths. The volumes are read-locked while
-// searched.
+// first, and returns their paths. The volumes stay read-locked until the
+// paths are built: a hit is an entry's place in its volume, which a change
+// that compacts the volume would give to another entry.
 func search(ctx context.Context, vols []*volume, q query, limit int) []string {
 	if len(q.groups) == 0 || limit <= 0 {
 		return nil
@@ -59,23 +60,19 @@ func search(ctx context.Context, vols []*volume, q query, limit int) []string {
 	best := &top{n: limit}
 	for _, v := range vols {
 		v.mu.RLock()
+		defer v.mu.RUnlock()
 		for _, h := range searchVolume(ctx, v, q, limit) {
 			best.offer(h)
 		}
 		if ctx.Err() != nil {
-			v.mu.RUnlock()
 			return nil
 		}
-		v.mu.RUnlock()
 	}
 	hits := best.hits
 	slices.SortFunc(hits, func(a, b hit) int { return b.score - a.score })
 	out := make([]string, 0, len(hits))
 	for _, h := range hits {
-		h.v.mu.RLock()
-		p, ok := h.v.path(h.i, false)
-		h.v.mu.RUnlock()
-		if ok {
+		if p, ok := h.v.path(h.i, false); ok {
 			out = append(out, p)
 		}
 	}
@@ -108,13 +105,14 @@ func searchVolume(ctx context.Context, v *volume, q query, limit int) []hit {
 // word in the names as one block, which is much faster than
 // testing each name, and tests only the entries it is found in.
 func scanRange(ctx context.Context, v *volume, q query, lo, hi int, out *top) {
+	c := &candidate{v: v}
 	test := func(i int) {
 		// An excluded folder stays only to recognise changes inside it.
 		if v.flags[i]&(flagDead|flagExcluded) != 0 {
 			return
 		}
-		c := candidate{v: v, i: i}
-		if !q.match(&c) {
+		c.i, c.built = i, false
+		if !q.match(c) {
 			return
 		}
 		// Depth only lowers a score, so a hit that cannot make the top

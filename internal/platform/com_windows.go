@@ -3,6 +3,8 @@ package platform
 import (
 	"syscall"
 	"unsafe"
+
+	"github.com/shirumesu/arubox/internal/floatcall"
 )
 
 // slotRelease is IUnknown::Release, the same slot in every COM interface.
@@ -23,6 +25,16 @@ func call(o comObject, slot int, args ...uintptr) uintptr {
 	method := *(*uintptr)(unsafe.Add(vtable, uintptr(slot)*unsafe.Sizeof(uintptr(0))))
 	r, _, _ := syscall.SyscallN(method, append([]uintptr{uintptr(o)}, args...)...)
 	return r
+}
+
+// callf is call for a method that takes FLOAT or D2D1_POINT_2F arguments by
+// value. kinds has one letter per argument: 'i' for an integer or pointer,
+// 'f' for f32 and 'p' for point2F. Through call, such a method gets its
+// arguments in the wrong registers on ARM64.
+//
+//go:uintptrescapes
+func callf(o comObject, slot int, kinds string, args ...uintptr) uintptr {
+	return floatcall.Method(unsafe.Pointer(o), slot, kinds, args...)
 }
 
 func release(o comObject) {

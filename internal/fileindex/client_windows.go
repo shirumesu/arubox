@@ -60,12 +60,17 @@ type Client struct {
 	message  string
 	dirty    bool
 	session  windows.Handle // set to end the current connection
+	// gen counts the times the index was thrown away, so a connection or
+	// a load begun before cannot bring back what was thrown away.
+	gen int
 
 	// Stop sets stop, which gives up the pipe I/O, and closes quit.
 	stop windows.Handle
 	quit chan struct{}
 	wake chan struct{}
 	done chan struct{}
+	// loaded is closed once load has run.
+	loaded chan struct{}
 }
 
 // NewClient creates a client that saves the index at snapshot and keeps
@@ -80,8 +85,13 @@ func NewClient(log *slog.Logger, snapshot string, excluded []string) *Client {
 		listing:  map[string]bool{},
 		state:    StateConnecting,
 		wake:     make(chan struct{}, 1),
+		loaded:   make(chan struct{}),
 	}
 }
+
+// Loaded is closed once the saved index has been read, or found missing,
+// so a search does not come up empty for the moment after Start.
+func (c *Client) Loaded() <-chan struct{} { return c.loaded }
 
 // Start loads the saved index and connects to the service in the
 // background.
@@ -157,6 +167,7 @@ func (c *Client) Remove() error {
 	}
 	c.mu.Lock()
 	c.vols, c.listing, c.dirty = map[string]*volume{}, map[string]bool{}, false
+	c.gen++
 	c.mu.Unlock()
 	os.Remove(c.snapshot)
 	c.reconnect()
@@ -173,6 +184,7 @@ func (c *Client) SetExcluded(excluded []string) {
 	}
 	c.excluded, c.ex = slices.Clone(excluded), newExcludes(excluded)
 	c.vols, c.listing, c.dirty = map[string]*volume{}, map[string]bool{}, false
+	c.gen++
 	c.mu.Unlock()
 	os.Remove(c.snapshot)
 	c.reconnect()
@@ -205,6 +217,7 @@ const saveEvery = 10 * time.Minute
 func (c *Client) run() {
 	defer close(c.done)
 	c.load()
+	close(c.loaded)
 	go func() {
 		t := time.NewTicker(saveEvery)
 		defer t.Stop()
@@ -232,17 +245,25 @@ func (c *Client) run() {
 // before the next try.
 func (c *Client) connect() time.Duration {
 	name, _ := windows.UTF16PtrFromString(pipeName)
+	// The other end may only identify the program, not act as its user.
 	h, err := windows.CreateFile(name, windows.GENERIC_READ|windows.GENERIC_WRITE, 0, nil,
-		windows.OPEN_EXISTING, windows.FILE_FLAG_OVERLAPPED, 0)
+		windows.OPEN_EXISTING, windows.FILE_FLAG_OVERLAPPED|windows.SECURITY_SQOS_PRESENT|windows.SECURITY_IDENTIFICATION, 0)
 	if err != nil {
-		switch st, qerr := queryService(); {
+		switch st, _, qerr := queryService(); {
 		case qerr != nil:
 			c.setState(StateStopped, qerr.Error())
 		case st == serviceMissing:
 			c.setState(StateMissing, "")
 			return time.Hour
 		case st == serviceStopped:
-			c.setState(StateStopped, "")
+			// The service runs only while wanted, so it is started here;
+			// one installed before it could be refuses.
+			if err := startService(); err != nil {
+				c.setState(StateStopped, err.Error())
+				break
+			}
+			c.setState(StateConnecting, "")
+			return 200 * time.Millisecond
 		default:
 			// Running, but not listening yet, or every instance busy.
 			c.setState(StateConnecting, "")
@@ -250,6 +271,10 @@ func (c *Client) connect() time.Duration {
 		return 3 * time.Second
 	}
 	defer closeHandle(h)
+	if err := checkServer(h); err != nil {
+		c.setState(StateStopped, err.Error())
+		return 3 * time.Second
+	}
 	session, err := windows.CreateEvent(nil, 1, 0, nil)
 	if err != nil {
 		c.setState(StateStopped, err.Error())
@@ -271,7 +296,7 @@ func (c *Client) connect() time.Duration {
 	case errors.Is(err, errOutdated):
 		c.setState(StateOutdated, "")
 		return time.Hour
-	case errors.Is(err, errStopped):
+	case errors.Is(err, errStopped), errors.Is(err, errDiscarded):
 		return 0
 	}
 	c.log.Warn("file index connection ended", "error", err)
@@ -279,10 +304,36 @@ func (c *Client) connect() time.Duration {
 	return 2 * time.Second
 }
 
-var errOutdated = errors.New("the index service is of another version")
+var (
+	errOutdated = errors.New("the index service is of another version")
+	// errDiscarded ends a connection begun before SetExcluded or Remove
+	// threw the index away; they are ending it too.
+	errDiscarded = errors.New("the index was thrown away")
+)
+
+// checkServer makes sure the other end of the pipe is the index service,
+// not a program that took the pipe's name while the service was not
+// running.
+func checkServer(pipe windows.Handle) error {
+	var server uint32
+	if err := windows.GetNamedPipeServerProcessId(pipe, &server); err != nil {
+		return fmt.Errorf("identify the index pipe's server: %w", err)
+	}
+	_, pid, err := queryService()
+	if err != nil {
+		return err
+	}
+	if server != pid {
+		return fmt.Errorf("the index pipe is served by process %d, not by the index service", server)
+	}
+	return nil
+}
 
 // receive says hello and applies frames until the connection ends.
 func (c *Client) receive(conn *handle) error {
+	c.mu.Lock()
+	ex, gen := c.ex, c.gen
+	c.mu.Unlock()
 	if err := writeFrame(conn, frameHello, encodeHello(c.states())); err != nil {
 		return err
 	}
@@ -309,7 +360,6 @@ func (c *Client) receive(conn *handle) error {
 		}
 	}
 	c.state, c.message = StateReady, ""
-	ex := c.ex
 	c.mu.Unlock()
 
 	// This connection's volumes by their index in it, and the volumes
@@ -323,13 +373,15 @@ func (c *Client) receive(conn *handle) error {
 			return err
 		}
 		buf = payload[:0]
-		if err := c.apply(kind, payload, ex, current, listing); err != nil {
+		if err := c.apply(kind, payload, ex, gen, current, listing); err != nil {
 			return err
 		}
 	}
 }
 
-func (c *Client) apply(kind byte, payload []byte, ex *excludes, current, listing map[byte]*volume) error {
+// apply applies one frame of a connection begun with the excluded folders
+// ex at generation gen.
+func (c *Client) apply(kind byte, payload []byte, ex *excludes, gen int, current, listing map[byte]*volume) error {
 	d := decoder{b: payload}
 	idx := d.u8()
 	switch kind {
@@ -338,16 +390,19 @@ func (c *Client) apply(kind byte, payload []byte, ex *excludes, current, listing
 		if d.err != nil {
 			return d.err
 		}
+		c.mu.Lock()
+		stale, v := c.gen != gen, c.vols[guid]
+		if !stale && full {
+			c.listing[guid] = true
+		}
+		c.mu.Unlock()
+		if stale {
+			return errDiscarded
+		}
 		if full {
 			listing[idx] = newVolume(guid, mount, id)
-			c.mu.Lock()
-			c.listing[guid] = true
-			c.mu.Unlock()
 			return nil
 		}
-		c.mu.Lock()
-		v := c.vols[guid]
-		c.mu.Unlock()
 		if v == nil {
 			return errors.New("the index service resumed a volume the program does not have")
 		}
@@ -376,6 +431,10 @@ func (c *Client) apply(kind byte, payload []byte, ex *excludes, current, listing
 		delete(listing, idx)
 		current[idx] = v
 		c.mu.Lock()
+		if c.gen != gen {
+			c.mu.Unlock()
+			return errDiscarded
+		}
 		c.vols[v.guid] = v
 		delete(c.listing, v.guid)
 		c.dirty = true
@@ -383,14 +442,19 @@ func (c *Client) apply(kind byte, payload []byte, ex *excludes, current, listing
 		c.log.Info("volume indexed", "volume", v.mount, "files", v.count())
 		// Listing a volume leaves behind the arrays it grew and the copy
 		// compacting made, several times the index's own size; hand them
-		// back to the system now rather than over the next minutes.
-		debug.FreeOSMemory()
+		// back to the system now rather than over the next minutes, once
+		// no other listing would take them again.
+		if len(listing) == 0 {
+			debug.FreeOSMemory()
+		}
 	case frameChanges:
 		v := current[idx]
 		if v == nil {
 			return errors.New("changes for an unknown volume")
 		}
 		next := int64(d.u64())
+		// entered are the folders moved in from outside the index.
+		var entered []uint32
 		v.mu.Lock()
 		for len(d.b) > 0 && d.err == nil {
 			op, frn := d.u8(), d.u64()
@@ -403,14 +467,24 @@ func (c *Client) apply(kind byte, payload []byte, ex *excludes, current, listing
 			for range n {
 				links = append(links, link{parent: d.u32(), name: d.str()})
 			}
-			if d.err == nil {
-				v.set(recordNumber(frn), sequence(frn), flags, links, ex)
+			if d.err != nil {
+				break
+			}
+			rec := recordNumber(frn)
+			was := op == changeMoved && flags&flagDir != 0 && v.indexedFolder(rec)
+			v.set(rec, sequence(frn), flags, links, ex)
+			if op == changeMoved && flags&flagDir != 0 && !was && v.indexedFolder(rec) {
+				entered = append(entered, rec)
 			}
 		}
 		if d.err == nil {
 			v.nextUSN = next
 		}
+		v.settle(ex)
 		v.mu.Unlock()
+		if d.err == nil && len(entered) > 0 {
+			c.fill(v, entered, ex)
+		}
 		c.mu.Lock()
 		c.dirty = true
 		c.mu.Unlock()
@@ -442,7 +516,7 @@ func (c *Client) states() []volumeState {
 
 func (c *Client) load() {
 	c.mu.Lock()
-	excluded := c.excluded
+	excluded, gen := c.excluded, c.gen
 	c.mu.Unlock()
 	vols, err := loadSnapshot(c.snapshot, excluded)
 	if err != nil {
@@ -452,10 +526,14 @@ func (c *Client) load() {
 		return
 	}
 	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.gen != gen {
+		// SetExcluded or Remove threw the index away while it loaded.
+		return
+	}
 	for _, v := range vols {
 		c.vols[v.guid] = v
 	}
-	c.mu.Unlock()
 }
 
 func (c *Client) save() {

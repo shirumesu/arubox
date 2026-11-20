@@ -38,6 +38,15 @@ type Module interface {
 	Settings() Page
 }
 
+// Settler is a module whose Disable leaves work running in the background,
+// such as saving a large file, so that turning it off does not hold up the
+// dashboard. The registry waits for that work before the program exits.
+type Settler interface {
+	// Settle waits for the work Disable left running. It runs on the UI
+	// thread, like Disable.
+	Settle()
+}
+
 // Page is one page of the dashboard.
 type Page interface {
 	// Draw draws the page's content in the column from x to x+w, starting

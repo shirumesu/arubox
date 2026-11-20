@@ -2,8 +2,8 @@ package screenshot
 
 import (
 	"math"
+	"runtime/debug"
 
-	"github.com/shirumesu/arubox/internal/platform"
 	"github.com/shirumesu/arubox/internal/ui"
 )
 
@@ -13,8 +13,8 @@ const (
 	maxZoom = 4.0
 	// zoomStep is how much one wheel step zooms.
 	zoomStep = 1.1
-	// copiedMillis is how long "已复制" shows after a copy.
-	copiedMillis = 1200
+	// noteMillis is how long "已复制", or why the copy failed, shows.
+	noteMillis = 1200
 )
 
 // pins holds the pinned pictures. Each lives until its window is closed.
@@ -35,7 +35,8 @@ type pin struct {
 
 	dragX, dragY int       // the mouse, on screen, when the drag began
 	dragStart    ui.Bounds // the window then
-	copied       int       // counts copies; nonzero shows "已复制"
+	note         string    // shown for a moment after a copy
+	notes        int       // counts notes, so only the last one clears it
 }
 
 // add pins a picture at b, in physical screen pixels. Call on the UI
@@ -51,7 +52,11 @@ func (p *pins) add(m *Module, pic picture, b ui.Bounds) {
 	win.OnClose = func() bool { return true }
 	win.OnDestroy = func() {
 		pn.img.Release()
+		pn.img, pn.pic = nil, picture{}
 		delete(p.all, pn)
+		// The picture can be screen sized; give it back to the system now
+		// rather than whenever the runtime gets to it.
+		go debug.FreeOSMemory()
 	}
 	if p.all == nil {
 		p.all = map[*pin]bool{}
@@ -80,7 +85,7 @@ func (pn *pin) Frame(f *ui.Frame) {
 		return
 	}
 	if f.KeyPressed('C', ui.ModifierCtrl) {
-		pn.copy()
+		pn.copy(false)
 	}
 	ev := f.Event()
 	// The window is moved by hand rather than as a caption, so a double
@@ -90,8 +95,7 @@ func (pn *pin) Frame(f *ui.Frame) {
 	case res.DoubleClicked:
 		// Closing by double click keeps the picture on the clipboard, so
 		// it is not lost with the pin.
-		pn.copy()
-		pn.close()
+		pn.copy(true)
 		return
 	case res.Pressed:
 		pn.dragX, pn.dragY = ui.CursorPos()
@@ -106,7 +110,17 @@ func (pn *pin) Frame(f *ui.Frame) {
 		ui.Post(func() { pn.win.SetBounds(to) })
 	}
 	if ev.Kind == ui.EvWheel && ev.Wheel != 0 {
-		pn.zoom = min(max(pn.zoom*math.Pow(zoomStep, ev.Wheel), minZoom), maxZoom)
+		zoom := pn.zoom * math.Pow(zoomStep, ev.Wheel)
+		if ev.Wheel > 0 {
+			// The window's picture is as big as the window, so it grows no
+			// bigger than its display: a 4K pin zoomed 4 times took half a
+			// gigabyte. One bigger already, moved from a larger display,
+			// keeps its size rather than shrinking.
+			d := pn.win.Monitor().Bounds
+			fit := min(float64(d.W)/float64(pn.size.W), float64(d.H)/float64(pn.size.H))
+			zoom = min(zoom, max(fit, pn.zoom))
+		}
+		pn.zoom = min(max(zoom, minZoom), maxZoom)
 		to := pn.win.Bounds()
 		to.W = max(int(float64(pn.size.W)*pn.zoom), 1)
 		to.H = max(int(float64(pn.size.H)*pn.zoom), 1)
@@ -121,40 +135,49 @@ func (pn *pin) Frame(f *ui.Frame) {
 		f.FillEllipse(r, ui.RGBA(0, 0, 0, 0.6))
 		f.Icon(r, ui.IconClose, 10, white)
 	}
-	if pn.copied != 0 {
+	if pn.note != "" {
 		t := ui.Text{Size: 11, Color: white, Align: ui.AlignCenter, Middle: true}
-		tw, th := ui.MeasureText("已复制", t, 0)
+		tw, th := ui.MeasureText(pn.note, t, 0)
 		r := ui.Rect{X: (b.W - tw - 16) / 2, Y: b.H - 6 - th - 4, W: tw + 16, H: th + 4}
 		f.FillRound(r, 4, ui.RGBA(0, 0, 0, 0.7))
-		f.Text(r, "已复制", t)
+		f.Text(r, pn.note, t)
 	}
 }
 
-// copy puts the picture on the clipboard and says so for a moment.
-func (pn *pin) copy() {
+// copy puts the picture on the clipboard. With thenClose the pin closes
+// once the picture is there; otherwise it says so for a moment. A failed
+// copy keeps the pin, so the picture is not lost, and says it failed.
+func (pn *pin) copy(thenClose bool) {
 	pic := pn.pic
 	go func() {
-		data, err := pic.png(true)
-		if err == nil {
-			err = platform.CopyImage(data)
-		}
+		err := pic.copy()
 		if err != nil {
 			pn.m.log.Warn("copy pinned screenshot", "error", err)
-			return
 		}
 		ui.Post(func() {
-			if pn.win.Closed() {
-				return
+			switch {
+			case pn.win.Closed():
+			case err != nil:
+				pn.show("复制失败")
+			case thenClose:
+				pn.win.Close()
+			default:
+				pn.show("已复制")
 			}
-			pn.copied++
-			n := pn.copied
-			pn.win.Invalidate()
-			pn.win.After(copiedMillis, func() {
-				if pn.copied == n {
-					pn.copied = 0
-					pn.win.Invalidate()
-				}
-			})
 		})
 	}()
+}
+
+// show shows a note at the bottom of the pin for a moment.
+func (pn *pin) show(note string) {
+	pn.note = note
+	pn.notes++
+	n := pn.notes
+	pn.win.Invalidate()
+	pn.win.After(noteMillis, func() {
+		if pn.notes == n {
+			pn.note = ""
+			pn.win.Invalidate()
+		}
+	})
 }

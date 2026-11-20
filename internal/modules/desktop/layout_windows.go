@@ -10,6 +10,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/shirumesu/arubox/internal/platform"
 )
 
 // span makes the rectangle between two corners.
@@ -27,9 +29,8 @@ func signature(monitors []Monitor) string {
 	return strings.Join(parts, "|")
 }
 
-// arrangement returns the arrangement for a set of monitors. A set seen for
-// the first time starts from the one used last, with boxes of missing
-// monitors moved to the first monitor and every box kept on its monitor.
+// arrangement returns the arrangement for a set of monitors, a new empty
+// one for a set seen for the first time.
 func (l *Layout) arrangement(monitors []Monitor) *Arrangement {
 	if l.Arrangements == nil {
 		l.Arrangements = map[string]*Arrangement{}
@@ -38,34 +39,138 @@ func (l *Layout) arrangement(monitors []Monitor) *Arrangement {
 	a := l.Arrangements[sig]
 	if a == nil {
 		a = &Arrangement{Boxes: map[string]Place{}, Icons: map[string]Cell{}}
-		var last *Arrangement
-		for _, o := range l.Arrangements {
-			if last == nil || o.Used > last.Used {
-				last = o
-			}
-		}
-		if last != nil {
-			byID := map[string]Monitor{}
-			for _, m := range monitors {
-				byID[m.ID] = m
-			}
-			for id, p := range last.Boxes {
-				m, ok := byID[p.Monitor]
-				if !ok {
-					m = monitors[0]
-				}
-				size := Rect{W: m.Bounds.W / m.Scale, H: m.Bounds.H / m.Scale}
-				p.Monitor = m.ID
-				p.Rect.W, p.Rect.H = math.Min(p.Rect.W, size.W), math.Min(p.Rect.H, size.H)
-				p.Rect.X = math.Max(0, math.Min(p.Rect.X, size.W-p.Rect.W))
-				p.Rect.Y = math.Max(0, math.Min(p.Rect.Y, size.H-p.Rect.H))
-				a.Boxes[id] = p
-			}
-		}
 		l.Arrangements[sig] = a
 	}
+	a.Monitors = slices.Clone(monitors)
 	a.Used = time.Now().Unix()
 	return a
+}
+
+// source returns the arrangement other than cur, with monitors known and
+// passing has, whose places carry over to cur's monitors best: the one
+// whose primary monitor's work area is nearest in size, then the one
+// edited, then used, last. It returns nil if there is none.
+func (l *Layout) source(cur *Arrangement, has func(*Arrangement) bool) *Arrangement {
+	var best *Arrangement
+	bestD := math.Inf(1)
+	for _, a := range l.Arrangements {
+		if a == cur || len(a.Monitors) == 0 || !has(a) {
+			continue
+		}
+		d := unlike(a.Monitors, cur.Monitors)
+		if best == nil || d < bestD-1e-9 || (math.Abs(d-bestD) <= 1e-9 && (a.Edited > best.Edited || (a.Edited == best.Edited && a.Used > best.Used))) {
+			best, bestD = a, d
+		}
+	}
+	return best
+}
+
+// unlike measures how far apart two sets of monitors are: by how much
+// their primary monitors' work areas differ in size, much further for
+// another number of monitors.
+func unlike(a, b []Monitor) float64 {
+	wa, wb := a[0].workDIP(), b[0].workDIP()
+	d := math.Abs(math.Log(wa.W/wb.W)) + math.Abs(math.Log(wa.H/wb.H))
+	if len(a) != len(b) {
+		d += 10
+	}
+	return d
+}
+
+// counterpart returns the monitor of to that stands for the monitor id of
+// from: the one with the same ID, else the one at the same place among
+// the monitors that are in only one of the sets, else the primary one.
+func counterpart(id string, from, to []Monitor) Monitor {
+	in := func(ms []Monitor, id string) bool {
+		return slices.ContainsFunc(ms, func(m Monitor) bool { return m.ID == id })
+	}
+	if i := slices.IndexFunc(to, func(m Monitor) bool { return m.ID == id }); i >= 0 {
+		return to[i]
+	}
+	var gone, added []Monitor
+	for _, m := range from {
+		if !in(to, m.ID) {
+			gone = append(gone, m)
+		}
+	}
+	for _, m := range to {
+		if !in(from, m.ID) {
+			added = append(added, m)
+		}
+	}
+	if i := slices.IndexFunc(gone, func(m Monitor) bool { return m.ID == id }); i >= 0 && i < len(added) {
+		return added[i]
+	}
+	return to[0]
+}
+
+// carry maps a place on the monitors from to the monitors to. It returns
+// false if from does not have the place's monitor.
+//
+// Each axis is mapped on its own, in the monitors' work areas. One that
+// shrinks shrinks everything on it alike, sizes too, so boxes keep their
+// look and never come to overlap. One that grows keeps the sizes, and
+// keeps each box as far from the end it is nearer to as it was: boxes
+// in the near half stay, those in the far half move along with the far
+// edge, so those apart stay apart there too.
+func carry(p Place, from, to []Monitor) (Place, bool) {
+	i := slices.IndexFunc(from, func(m Monitor) bool { return m.ID == p.Monitor })
+	if i < 0 {
+		return Place{}, false
+	}
+	src, dst := from[i].workDIP(), counterpart(p.Monitor, from, to)
+	dw := dst.workDIP()
+	x, w := carrySpan(p.Rect.X-src.X, p.Rect.W, src.W, dw.W)
+	y, h := carrySpan(p.Rect.Y-src.Y, p.Rect.H, src.H, dw.H)
+	return Place{Monitor: dst.ID, Rect: Rect{dw.X + x, dw.Y + y, w, h}}, true
+}
+
+// carrySpan maps the span from a of length n on an axis of length from
+// onto one of length to.
+func carrySpan(a, n, from, to float64) (float64, float64) {
+	if to < from {
+		k := to / from
+		return a * k, n * k
+	}
+	if a+n/2 > from/2 {
+		return a + to - from, n
+	}
+	return a, n
+}
+
+// freeSpot returns the place nearest r, inside area, where r overlaps none
+// of others and keeps gap from them. The places tried are those beside
+// the area's edges and the others' edges; if r fits nowhere it is
+// returned as it is.
+func freeSpot(r, area Rect, others []Rect, gap float64) Rect {
+	free := func(c Rect) bool {
+		if c.X < area.X-0.5 || c.Y < area.Y-0.5 || c.Right() > area.Right()+0.5 || c.Bottom() > area.Bottom()+0.5 {
+			return false
+		}
+		g := c.Inset(-gap + 0.5)
+		return !slices.ContainsFunc(others, func(o Rect) bool {
+			return g.X < o.Right() && o.X < g.Right() && g.Y < o.Bottom() && o.Y < g.Bottom()
+		})
+	}
+	if free(r) {
+		return r
+	}
+	xs := []float64{r.X, area.X, area.Right() - r.W}
+	ys := []float64{r.Y, area.Y, area.Bottom() - r.H}
+	for _, o := range others {
+		xs = append(xs, o.Right()+gap, o.X-gap-r.W, o.X)
+		ys = append(ys, o.Bottom()+gap, o.Y-gap-r.H, o.Y)
+	}
+	best, bestD := r, math.Inf(1)
+	for _, x := range xs {
+		for _, y := range ys {
+			c := Rect{x, y, r.W, r.H}
+			if d := (x-r.X)*(x-r.X) + (y-r.Y)*(y-r.Y); d < bestD && free(c) {
+				best, bestD = c, d
+			}
+		}
+	}
+	return best
 }
 
 // boxOf returns the box holding a desktop item, or nil.
@@ -97,12 +202,15 @@ func (l *Layout) take(keys []string) {
 // put moves items into a box before position at, or to its end when at is
 // out of range.
 func (l *Layout) put(b *Box, keys []string, at int) {
-	// Items moved within the box shift the position they go to.
+	// Items moved within the box from before the position shift it back,
+	// each by one, as they stood before any is taken out.
+	shift := 0
 	for _, k := range keys {
 		if i := slices.Index(b.Items, k); i >= 0 && i < at {
-			at--
+			shift++
 		}
 	}
+	at -= shift
 	l.take(keys)
 	if at < 0 || at > len(b.Items) {
 		at = len(b.Items)
@@ -123,6 +231,51 @@ func (l *Layout) rename(old, now string) {
 			a.Icons[now] = c
 		}
 	}
+}
+
+// placed reports whether an item has a place: in a box, or on the grid
+// of any set of monitors.
+func (l *Layout) placed(key string) bool {
+	if l.boxOf(key) != nil {
+		return true
+	}
+	for _, a := range l.Arrangements {
+		if _, ok := a.Icons[key]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// follow moves the places of items gone from the desktop, or whose names
+// another item now has, to the items now there with the same file ID,
+// unless those have places of their own, and
+// then records the IDs of the items there are. It returns the renames, old
+// names first.
+func (l *Layout) follow(items map[string]platform.ShellItem) [][2]string {
+	byID := map[string]string{}
+	for k, it := range items {
+		if it.ID != "" {
+			byID[it.ID] = k
+		}
+	}
+	var renames [][2]string
+	for old, id := range l.Files {
+		// An item there under the old name with another ID is a new one
+		// that took the name of one renamed.
+		if it, ok := items[old]; ok && it.ID == id {
+			continue
+		}
+		if now, ok := byID[id]; ok && !l.placed(now) {
+			l.rename(old, now)
+			renames = append(renames, [2]string{old, now})
+		}
+	}
+	l.Files = make(map[string]string, len(byID))
+	for id, k := range byID {
+		l.Files[k] = id
+	}
+	return renames
 }
 
 // forget drops items that no longer exist.

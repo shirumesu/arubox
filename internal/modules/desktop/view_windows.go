@@ -1,9 +1,13 @@
 package desktop
 
 import (
+	"cmp"
+	"maps"
 	"math"
+	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/shirumesu/arubox/internal/design"
@@ -78,6 +82,13 @@ type portal struct {
 	path  string
 	back  []string
 	items []platform.ShellItem
+	// err is why the folder could not be read, shown in place of its
+	// items; nil once it is read.
+	err error
+	// sorted are the items in the order sortedBy, kept until the items or
+	// the order change, since every layout shows them.
+	sorted   []platform.ShellItem
+	sortedBy string
 }
 
 type iconKey struct {
@@ -108,10 +119,14 @@ type view struct {
 	boxes []*boxGeo // in drawing order
 	loose []*cell
 
-	pixels  map[iconKey]platform.Image
-	bitmaps map[*platform.Canvas]map[iconKey]*platform.Bitmap
+	pixels     map[iconKey]platform.Image
+	pixelBytes int // the size of pixels' pictures
+	bitmaps    map[*platform.Canvas]map[iconKey]*platform.Bitmap
+	icons      chan iconKey
+	// loading are the icons asked for and not yet kept; the loader skips
+	// those taken out of it. iconMu guards it, as the loader reads it.
+	iconMu  sync.Mutex
 	loading map[iconKey]bool
-	icons   chan iconKey
 	texts   map[labelKey]*platform.TextLayout
 
 	selected map[string]bool
@@ -136,8 +151,14 @@ type view struct {
 	lastY    float64
 
 	refreshQueued bool
-	saveQueued    bool
-	stopping      bool
+	// changedAll and changed are what a queued refresh reads again besides
+	// the desktop: every portal, or those showing the items in changed, by
+	// folderKey, or their folders.
+	changedAll bool
+	changed    map[string]bool
+	saveQueued bool
+	stopping   bool
+	unshown    int // icons without room on the grids, as last laid out
 }
 
 // anim moves a box's height from one value to another.
@@ -171,6 +192,7 @@ func startView(m *Module, s stored) (*view, error) {
 		pixels: map[iconKey]platform.Image{}, bitmaps: map[*platform.Canvas]map[iconKey]*platform.Bitmap{},
 		loading: map[iconKey]bool{}, icons: make(chan iconKey, 4096), texts: map[labelKey]*platform.TextLayout{},
 		selected: map[string]bool{}, heights: map[string]*anim{}, peeking: map[string]bool{}, scroll: map[string]float64{},
+		changed: map[string]bool{},
 	}
 	go v.loadIcons()
 	if _, err := platform.AttachDesktop(v); err != nil {
@@ -187,6 +209,10 @@ func (v *view) stop() {
 		v.m.saveLayout(v.layout)
 	})
 	v.d.Detach()
+	// The loader drops what is left to load.
+	v.iconMu.Lock()
+	clear(v.loading)
+	v.iconMu.Unlock()
 	close(v.icons)
 }
 
@@ -202,10 +228,32 @@ func (v *view) setSettings(s Settings) {
 	})
 }
 
+// restore replaces the layout with a snapshot's.
+func (v *view) restore(l Layout) {
+	v.d.Do(func() {
+		if v.stopping {
+			return
+		}
+		v.layout = l
+		v.arr = v.layout.arrangement(toMonitors(v.monitors))
+		clear(v.portals)
+		clear(v.selected)
+		v.selBox, v.anchor = "", ""
+		clear(v.heights)
+		clear(v.peeking)
+		clear(v.scroll)
+		v.loadItems(everyPortal)
+		v.arrange()
+		v.watch()
+		v.invalidateAll()
+		v.save()
+	})
+}
+
 // Attached is called on the UI thread before the monitors.
 func (v *view) Attached(d *platform.Desktop) {
 	v.d = d
-	v.loadItems()
+	v.loadItems(everyPortal)
 }
 
 // Monitors lays everything out for a new set of monitors.
@@ -234,8 +282,12 @@ func fromBox(b platform.Box) Rect { return Rect{b.X, b.Y, b.Width, b.Height} }
 
 func toBox(r Rect) platform.Box { return platform.Box{X: r.X, Y: r.Y, Width: r.W, Height: r.H} }
 
-// loadItems reads the desktop's items and the portals' folders.
-func (v *view) loadItems() {
+// everyPortal has loadItems read every portal's folder.
+func everyPortal(*portal) bool { return true }
+
+// loadItems reads the desktop's items, and the folders of the portals
+// reread passes and of new ones.
+func (v *view) loadItems(reread func(*portal) bool) {
 	items, err := platform.DesktopItems()
 	if err != nil {
 		v.m.log.Warn("list desktop items", "error", err)
@@ -244,16 +296,32 @@ func (v *view) loadItems() {
 	known := v.items
 	v.items = make(map[string]platform.ShellItem, len(items))
 	v.order = v.order[:0]
-	var added []string
 	for _, it := range items {
 		if old, ok := known[it.Key]; ok && !old.Modified.Equal(it.Modified) {
 			v.forgetIcon(it.Key)
 		}
-		if _, ok := known[it.Key]; !ok && len(known) > 0 {
-			added = append(added, it.Key)
-		}
 		v.items[it.Key] = it
 		v.order = append(v.order, it.Key)
+	}
+	// Renames the shell did not report, or made while arubox was not
+	// running, are found by the files' IDs.
+	files := v.layout.Files
+	for _, r := range v.layout.follow(v.items) {
+		if v.selected[r[0]] {
+			delete(v.selected, r[0])
+			v.selected[r[1]] = true
+		}
+	}
+	if !maps.Equal(files, v.layout.Files) {
+		v.save()
+	}
+	// Items new to the layout go where they were dropped or pasted;
+	// renamed ones already have a place.
+	var added []string
+	for _, it := range items {
+		if _, ok := known[it.Key]; !ok && len(known) > 0 && !v.layout.placed(it.Key) {
+			added = append(added, it.Key)
+		}
 	}
 	// The Recycle Bin's icon shows whether it is empty.
 	for k := range v.items {
@@ -271,9 +339,12 @@ func (v *view) loadItems() {
 		if p == nil {
 			p = &portal{path: b.Folder}
 			v.portals[b.ID] = p
+		} else if !reread(p) {
+			continue
 		}
 		v.loadPortal(p)
 	}
+	v.pruneIcons()
 	if len(added) > 0 {
 		v.placeNew(added)
 	}
@@ -297,15 +368,23 @@ func (v *view) loadItems() {
 
 func (v *view) loadPortal(p *portal) {
 	items, err := platform.FolderItems(p.path)
+	p.sorted, p.sortedBy = nil, ""
 	if err != nil {
-		p.items = nil
+		// Logged when it starts failing, not on every refresh after.
+		if p.err == nil || p.err.Error() != err.Error() {
+			v.m.log.Warn("read portal folder", "folder", p.path, "error", err)
+		}
+		p.items, p.err = nil, err
 		return
 	}
+	p.err = nil
+	modified := make(map[string]time.Time, len(p.items))
+	for _, old := range p.items {
+		modified[old.Key] = old.Modified
+	}
 	for _, it := range items {
-		for _, old := range p.items {
-			if old.Key == it.Key && !old.Modified.Equal(it.Modified) {
-				v.forgetIcon(it.Key)
-			}
+		if t, ok := modified[it.Key]; ok && !t.Equal(it.Modified) {
+			v.forgetIcon(it.Key)
 		}
 	}
 	p.items = items
@@ -341,8 +420,10 @@ func (v *view) watch() {
 }
 
 // ShellChanged follows renames at once and reads the items again shortly,
-// once a burst of changes is over.
-func (v *view) ShellChanged(renames [][2]string) {
+// once a burst of changes is over: the desktop's, and the folders of the
+// portals that show the items changed, or of every portal when those are
+// not known.
+func (v *view) ShellChanged(changed []string, renames [][2]string) {
 	for _, r := range renames {
 		if r[0] != "" && r[1] != "" {
 			v.layout.rename(r[0], r[1])
@@ -352,6 +433,16 @@ func (v *view) ShellChanged(renames [][2]string) {
 			}
 		}
 	}
+	if len(changed) == 0 {
+		v.changedAll = true
+	}
+	for _, p := range changed {
+		if p == "" {
+			v.changedAll = true
+			continue
+		}
+		v.changed[folderKey(p)] = true
+	}
 	if v.refreshQueued {
 		return
 	}
@@ -359,15 +450,49 @@ func (v *view) ShellChanged(renames [][2]string) {
 	time.AfterFunc(150*time.Millisecond, func() {
 		v.d.Do(func() {
 			v.refreshQueued = false
+			all, changed := v.changedAll, v.changed
+			v.changedAll, v.changed = false, map[string]bool{}
 			if v.stopping {
 				return
 			}
-			v.loadItems()
+			folders := v.changedFolders(changed)
+			// A folder outside the file system may be named otherwise in
+			// the changes, so it is read on every one.
+			v.loadItems(func(p *portal) bool {
+				return all || folders == nil || !filepath.IsAbs(p.path) || folders[folderKey(p.path)]
+			})
 			v.arrange()
 			v.invalidateAll()
 		})
 	})
 }
+
+// changedFolders returns the folders, by folderKey, the items changed are
+// in, or are, themselves, as when a portal's folder is updated or deleted.
+// It returns nil when an item is neither on the desktop nor in a portal's
+// folder, as through a link to the folder, so every portal is read.
+func (v *view) changedFolders(changed map[string]bool) map[string]bool {
+	desktop := folderKey(platform.DesktopFolder())
+	folders := map[string]bool{}
+	for name := range changed {
+		dir := folderKey(filepath.Dir(name))
+		known := name == desktop || dir == desktop || strings.HasPrefix(name, "::")
+		for _, p := range v.portals {
+			if k := folderKey(p.path); k == name || k == dir {
+				known = true
+			}
+		}
+		if !known {
+			return nil
+		}
+		folders[name], folders[dir] = true, true
+	}
+	return folders
+}
+
+// folderKey names a folder for matching paths as Windows does, ignoring
+// case.
+func folderKey(path string) string { return strings.ToLower(filepath.Clean(path)) }
 
 // save keeps the layout shortly, once a burst of changes is over.
 func (v *view) save() {
@@ -421,6 +546,7 @@ func (v *view) setPlace(id string, r platform.Box) {
 	mon := v.monitorAt(r.X+r.Width/2, r.Y+r.Height/2)
 	s := mon.Scale
 	v.arr.Boxes[id] = Place{Monitor: mon.ID, Rect: Rect{(r.X - mon.Bounds.X) / s, (r.Y - mon.Bounds.Y) / s, r.Width / s, r.Height / s}}
+	v.arr.Edited = time.Now().Unix()
 }
 
 // arrange lays out the boxes and the loose icons.
@@ -428,15 +554,17 @@ func (v *view) arrange() {
 	if len(v.monitors) == 0 {
 		return
 	}
+	// Cleared, so the slots left over do not keep old boxes' items.
+	clear(v.boxes)
 	v.boxes = v.boxes[:0]
+	placed := false
 	for i := range v.layout.Boxes {
 		b := &v.layout.Boxes[i]
 		p, ok := v.arr.Boxes[b.ID]
 		if !ok {
-			// A box new to these monitors goes to the top right corner.
-			mon := v.monitors[0]
-			p = Place{Monitor: mon.ID, Rect: Rect{X: (mon.Work.X-mon.Bounds.X+mon.Work.Width)/mon.Scale - 320, Y: (mon.Work.Y-mon.Bounds.Y)/mon.Scale + 20, W: 300, H: 240}}
+			p = v.newPlace(b.ID)
 			v.arr.Boxes[b.ID] = p
+			placed = true
 		}
 		mon := v.monitor(p.Monitor)
 		g := &boxGeo{box: b, mon: mon, m: v.metrics(mon.Scale), full: placeRect(p, mon)}
@@ -444,6 +572,37 @@ func (v *view) arrange() {
 		v.boxes = append(v.boxes, g)
 	}
 	v.arrangeLoose()
+	if placed {
+		v.save()
+	}
+}
+
+// newPlace finds a place for a box these monitors have none for: where it
+// is on the monitors most like these, or else the top right corner, moved
+// clear of the boxes that have a place here.
+func (v *view) newPlace(id string) Place {
+	cur := toMonitors(v.monitors)
+	var p Place
+	ok := false
+	if src := v.layout.source(v.arr, func(a *Arrangement) bool { _, ok := a.Boxes[id]; return ok }); src != nil {
+		p, ok = carry(src.Boxes[id], src.Monitors, cur)
+	}
+	if !ok {
+		mon := cur[0]
+		w := mon.workDIP()
+		p = Place{Monitor: mon.ID, Rect: Rect{X: w.Right() - 320, Y: w.Y + 20, W: 300, H: 240}}
+	}
+	mon := v.monitor(p.Monitor)
+	m := v.metrics(mon.Scale)
+	var others []Rect
+	for _, b := range v.layout.Boxes {
+		if o, ok := v.arr.Boxes[b.ID]; ok && b.ID != id && o.Monitor == mon.ID {
+			others = append(others, fromBox(placeRect(o, mon)))
+		}
+	}
+	r := freeSpot(fromBox(placeRect(p, mon)), fromBox(mon.Work), others, v.snapGap(m))
+	p.Rect = Rect{(r.X - mon.Bounds.X) / mon.Scale, (r.Y - mon.Bounds.Y) / mon.Scale, r.W / mon.Scale, r.H / mon.Scale}
+	return p
 }
 
 // layoutBox places a box's title, content and items.
@@ -466,6 +625,7 @@ func (v *view) layoutBox(g *boxGeo) {
 	g.contentH = float64(rows) * m.cellH
 	visible := g.full.Height - m.title - m.pad
 	g.scroll = math.Max(0, math.Min(v.scroll[g.box.ID]*m.scale, g.contentH-visible))
+	clear(g.cells)
 	g.cells = g.cells[:0]
 	for i, it := range items {
 		r := platform.Box{X: g.content.X + float64(i%cols)*cw, Y: g.content.Y + float64(i/cols)*m.cellH - g.scroll, Width: cw, Height: m.cellH}
@@ -473,24 +633,31 @@ func (v *view) layoutBox(g *boxGeo) {
 	}
 }
 
-// boxItems returns the items a box shows, in its order.
+// boxItems returns the items a box shows, in its order. A portal's are its
+// own, kept sorted, which the caller must not change.
 func (v *view) boxItems(b *Box) []platform.ShellItem {
-	var items []platform.ShellItem
 	if b.Folder != "" {
-		if p := v.portals[b.ID]; p != nil {
-			items = slices.Clone(p.items)
+		p := v.portals[b.ID]
+		if p == nil {
+			return nil
 		}
-	} else {
-		for _, k := range b.Items {
-			if it, ok := v.items[k]; ok {
-				items = append(items, it)
-			}
+		mode := cmp.Or(b.Sort, "name")
+		if p.sortedBy != mode {
+			p.sorted, p.sortedBy = sortedItems(slices.Clone(p.items), mode), mode
+		}
+		return p.sorted
+	}
+	var items []platform.ShellItem
+	for _, k := range b.Items {
+		if it, ok := v.items[k]; ok {
+			items = append(items, it)
 		}
 	}
-	mode := b.Sort
-	if b.Folder != "" && mode == "" {
-		mode = "name"
-	}
+	return sortedItems(items, b.Sort)
+}
+
+// sortedItems orders items by a sort mode, in place.
+func sortedItems(items []platform.ShellItem, mode string) []platform.ShellItem {
 	if mode == "" {
 		return items
 	}
@@ -510,15 +677,20 @@ func (v *view) boxItems(b *Box) []platform.ShellItem {
 // arrangeLoose places the icons not in a box on their monitors' grids,
 // giving a free cell to icons without one.
 func (v *view) arrangeLoose() {
+	clear(v.loose)
 	v.loose = v.loose[:0]
 	taken := map[Cell]bool{}
-	var unplaced []string
+	var unplaced, missing []string
 	for _, k := range v.order {
 		if v.layout.boxOf(k) != nil {
 			continue
 		}
 		c, ok := v.arr.Icons[k]
-		if !ok || taken[c] || !v.cellFree(c, nil) {
+		if !ok {
+			missing = append(missing, k)
+			continue
+		}
+		if taken[c] || !v.cellFree(c, nil) {
 			unplaced = append(unplaced, k)
 			continue
 		}
@@ -530,8 +702,21 @@ func (v *view) arrangeLoose() {
 		v.arr.Icons[k] = c
 		v.loose = append(v.loose, v.looseCell(k, c))
 	}
+	// Icons new to these monitors go where they are on the monitors most
+	// like these, if they have been anywhere.
+	for _, k := range missing {
+		if x, y, ok := v.carryIcon(k); ok {
+			if c, ok := v.freeCell(taken, v.monitorAt(x, y), x, y); ok {
+				place(k, c)
+				continue
+			}
+		}
+		unplaced = append(unplaced, k)
+	}
 	// Icons new to the layout go where File Explorer had them, in its
-	// column order, so a first takeover keeps the desktop as it was.
+	// column order, so a first takeover keeps the desktop as it was; the
+	// rest go in the first free cells, on the primary monitor first.
+	unshown := 0
 	if len(unplaced) > 0 {
 		waiting := map[string]bool{}
 		for _, k := range unplaced {
@@ -551,14 +736,60 @@ func (v *view) arrangeLoose() {
 			if !waiting[k] {
 				continue
 			}
-			if c, ok := v.freeCell(taken, v.monitors[0], 0, 0); ok {
-				place(k, c)
+			// Once the grids are full, they stay full for the rest.
+			if unshown == 0 {
+				if c, ok := v.firstFreeCell(taken); ok {
+					place(k, c)
+					continue
+				}
 			}
+			unshown++
 		}
 	}
-	if len(unplaced) > 0 {
+	// Reported once each time the grids fill up, not on every layout.
+	if unshown > 0 && v.unshown == 0 {
+		v.m.log.Warn("no room left on the desktop's grid; icons not shown", "count", unshown)
+	}
+	v.unshown = unshown
+	if len(unplaced) > 0 || len(missing) > 0 {
 		v.save()
 	}
+}
+
+// firstFreeCell returns the first free cell going down the columns of the
+// monitors, the primary one first.
+func (v *view) firstFreeCell(taken map[Cell]bool) (Cell, bool) {
+	for _, mon := range v.monitors {
+		if c, ok := v.freeCell(taken, mon, 0, 0); ok {
+			return c, true
+		}
+	}
+	return Cell{}, false
+}
+
+// carryIcon returns where, in screen pixels, an icon these monitors have no
+// cell for is on the monitors most like these.
+func (v *view) carryIcon(key string) (float64, float64, bool) {
+	src := v.layout.source(v.arr, func(a *Arrangement) bool { _, ok := a.Icons[key]; return ok })
+	if src == nil {
+		return 0, 0, false
+	}
+	c := src.Icons[key]
+	// The middle of the cell, in DIPs from its monitor's top left corner,
+	// as a point box to carry over.
+	i := slices.IndexFunc(src.Monitors, func(m Monitor) bool { return m.ID == c.Monitor })
+	if i < 0 {
+		return 0, 0, false
+	}
+	sm := v.metrics(1)
+	w := src.Monitors[i].workDIP()
+	pt := Rect{X: w.X + sm.margin + (float64(c.Col)+0.5)*sm.cellW, Y: w.Y + sm.margin + (float64(c.Row)+0.5)*sm.cellH}
+	p, ok := carry(Place{Monitor: c.Monitor, Rect: pt}, src.Monitors, toMonitors(v.monitors))
+	if !ok {
+		return 0, 0, false
+	}
+	mon := v.monitor(p.Monitor)
+	return mon.Bounds.X + p.Rect.X*mon.Scale, mon.Bounds.Y + p.Rect.Y*mon.Scale, true
 }
 
 func (v *view) looseCell(key string, c Cell) *cell {
@@ -577,7 +808,8 @@ func (v *view) gridSize(mon platform.DesktopMonitor, m metrics) (int, int) {
 }
 
 // cellFree reports whether a cell is on its monitor's grid and outside
-// every box but skip.
+// every box but skip, as the box is at rest: a rolled-up box open for a
+// peek, or rolling, leaves the icons below it where they are.
 func (v *view) cellFree(c Cell, skip *Box) bool {
 	mon := v.monitor(c.Monitor)
 	if mon.ID != c.Monitor {
@@ -588,9 +820,13 @@ func (v *view) cellFree(c Cell, skip *Box) bool {
 	if c.Col < 0 || c.Row < 0 || c.Col >= cols || c.Row >= rows {
 		return false
 	}
-	r := v.cellRect(c, mon, m)
+	r := toBox(fromBox(v.cellRect(c, mon, m)).Inset(m.pad))
 	for _, g := range v.boxes {
-		if g.box != skip && intersects(toBox(fromBox(r).Inset(m.pad)), g.rect) {
+		rest := g.full
+		if g.box.Rolled {
+			rest.Height = g.m.title
+		}
+		if g.box != skip && intersects(r, rest) {
 			return false
 		}
 	}
@@ -624,25 +860,34 @@ func (v *view) freeCell(taken map[Cell]bool, mon platform.DesktopMonitor, x, y f
 }
 
 // placeLoose puts items on the desktop around a point: the first in the
-// free cell nearest it, the others in the free cells nearest that.
-func (v *view) placeLoose(keys []string, x, y float64) {
-	v.layout.take(keys)
+// free cell nearest it, the others in the free cells nearest that, on the
+// point's monitor or, once that is full, on the others. Items there is no
+// room for stay where they are. It returns the items placed.
+func (v *view) placeLoose(keys []string, x, y float64) []string {
 	taken := map[Cell]bool{}
 	for _, c := range v.loose {
 		if !slices.Contains(keys, c.item.Key) {
 			taken[v.arr.Icons[c.item.Key]] = true
 		}
 	}
-	mon := v.monitorAt(x, y)
+	v.arr.Edited = time.Now().Unix()
+	first := v.monitorAt(x, y)
+	mons := append([]platform.DesktopMonitor{first}, slices.DeleteFunc(slices.Clone(v.monitors), func(m platform.DesktopMonitor) bool { return m.ID == first.ID })...)
+	var placed []string
 	for _, k := range keys {
-		c, ok := v.freeCell(taken, mon, x, y)
-		if !ok {
-			break
+		for len(mons) > 0 {
+			if c, ok := v.freeCell(taken, mons[0], x, y); ok {
+				taken[c] = true
+				v.arr.Icons[k] = c
+				placed = append(placed, k)
+				break
+			}
+			mons = mons[1:]
 		}
-		taken[c] = true
-		v.arr.Icons[k] = c
 	}
+	v.layout.take(placed)
 	v.arrange()
+	return placed
 }
 
 func intersects(a, b platform.Box) bool {
@@ -680,20 +925,21 @@ func (v *view) animateHeight(g *boxGeo, to float64) {
 	v.d.Animate(true)
 }
 
-// Tick moves the animations along.
+// Tick moves the animations along. Only the boxes rolling are laid out
+// again: the icons around a box keep their cells while it rolls.
 func (v *view) Tick() {
 	for id, a := range v.heights {
 		if time.Since(a.start) >= animTime {
 			delete(v.heights, id)
 		}
 		if g := v.geoOf(id); g != nil {
+			v.layoutBox(g)
 			v.invalidate(g.full)
 		}
 	}
 	if len(v.heights) == 0 {
 		v.d.Animate(false)
 	}
-	v.arrange()
 }
 
 func (v *view) invalidate(b platform.Box) {
@@ -739,18 +985,103 @@ func (v *view) invalidateAll() {
 	}
 }
 
-// loadIcons fetches icons off the UI thread, since thumbnails can be slow.
+// iconBudget bounds the pixels kept of icons, beyond those of the items in
+// sight: past it, the others, such as those of a folder scrolled past, are
+// dropped and loaded again when they show.
+const iconBudget = 16 << 20
+
+// loadIcons fetches icons off the UI thread, since thumbnails can be slow,
+// skipping those no longer wanted.
 func (v *view) loadIcons() {
 	for k := range v.icons {
+		v.iconMu.Lock()
+		wanted := v.loading[k]
+		v.iconMu.Unlock()
+		if !wanted {
+			continue
+		}
 		img := platform.ItemImage(k.key, k.px)
 		v.d.Do(func() {
-			if v.stopping {
+			v.iconMu.Lock()
+			wanted := v.loading[k]
+			delete(v.loading, k)
+			v.iconMu.Unlock()
+			if v.stopping || !wanted {
 				return
 			}
-			delete(v.loading, k)
-			v.pixels[k] = img
+			v.keepPixels(k, img)
 			v.invalidateItem(k.key)
 		})
+	}
+}
+
+// keepPixels keeps an icon's pixels and, past the budget, drops the icons
+// out of sight.
+func (v *view) keepPixels(k iconKey, img platform.Image) {
+	if old, ok := v.pixels[k]; ok {
+		v.pixelBytes -= len(old.Pixels)
+	}
+	v.pixels[k] = img
+	v.pixelBytes += len(img.Pixels)
+	if v.pixelBytes > iconBudget {
+		shown := v.iconsInSight()
+		v.dropIconsWhere(func(k iconKey) bool { return !shown[k] })
+	}
+}
+
+// iconsInSight returns the icons of the items drawn.
+func (v *view) iconsInSight() map[iconKey]bool {
+	out := map[iconKey]bool{}
+	for _, c := range v.loose {
+		out[iconKey{c.item.Key, int(c.m.icon)}] = true
+	}
+	for _, g := range v.boxes {
+		if g.rect.Height <= g.m.title+1 {
+			continue
+		}
+		for _, c := range g.cells {
+			if intersects(c.rect, g.content) {
+				out[iconKey{c.item.Key, int(c.m.icon)}] = true
+			}
+		}
+	}
+	return out
+}
+
+// pruneIcons drops the icons of items no longer on the desktop or in a
+// portal's folder, and stops loading them.
+func (v *view) pruneIcons() {
+	present := make(map[string]bool, len(v.items))
+	for k := range v.items {
+		present[k] = true
+	}
+	for _, p := range v.portals {
+		for _, it := range p.items {
+			present[it.Key] = true
+		}
+	}
+	gone := func(k iconKey) bool { return !present[k.key] }
+	v.dropIconsWhere(gone)
+	v.iconMu.Lock()
+	maps.DeleteFunc(v.loading, func(k iconKey, _ bool) bool { return gone(k) })
+	v.iconMu.Unlock()
+}
+
+// dropIconsWhere drops the icons, pixels and bitmaps, drop is true for.
+func (v *view) dropIconsWhere(drop func(iconKey) bool) {
+	for k, img := range v.pixels {
+		if drop(k) {
+			v.pixelBytes -= len(img.Pixels)
+			delete(v.pixels, k)
+		}
+	}
+	for _, byKey := range v.bitmaps {
+		for k, b := range byKey {
+			if drop(k) {
+				b.Release()
+				delete(byKey, k)
+			}
+		}
 	}
 }
 
@@ -768,6 +1099,7 @@ func (v *view) icon(c *platform.Canvas, key string, px int) *platform.Bitmap {
 	}
 	img, ok := v.pixels[k]
 	if !ok {
+		v.iconMu.Lock()
 		if !v.loading[k] {
 			select {
 			case v.icons <- k:
@@ -775,6 +1107,7 @@ func (v *view) icon(c *platform.Canvas, key string, px int) *platform.Bitmap {
 			default:
 			}
 		}
+		v.iconMu.Unlock()
 		return nil
 	}
 	b := c.NewBitmap(img)
@@ -784,24 +1117,13 @@ func (v *view) icon(c *platform.Canvas, key string, px int) *platform.Bitmap {
 
 // forgetIcon drops an item's icon so it is loaded again.
 func (v *view) forgetIcon(key string) {
-	for k := range v.pixels {
-		if k.key == key {
-			delete(v.pixels, k)
-		}
-	}
-	for _, byKey := range v.bitmaps {
-		for k, b := range byKey {
-			if k.key == key {
-				b.Release()
-				delete(byKey, k)
-			}
-		}
-	}
+	v.dropIconsWhere(func(k iconKey) bool { return k.key == key })
 }
 
 // dropIcons drops every icon, for a new icon size.
 func (v *view) dropIcons() {
 	clear(v.pixels)
+	v.pixelBytes = 0
 	for _, byKey := range v.bitmaps {
 		for _, b := range byKey {
 			b.Release()

@@ -39,8 +39,9 @@ linters:
       - std-error-handling
     rules:
       # System calls need unsafe pointers; they are confined to the platform
-      # and UI layers, the ONNX Runtime binding and the speech players.
-      - path: internal/(platform|fileindex|ort|ui)/|internal/modules/translate/(aloud|mci|sapi)\.go
+      # and UI layers and their COM helpers, the ONNX Runtime binding and
+      # the speech players.
+      - path: internal/(platform|fileindex|ort|ui|floatcall|pixellock)/|internal/modules/translate/(aloud|mci|sapi)\.go
         linters: [gosec]
         text: "G103"
       # A window procedure gets pointers to structures as an LPARAM, and

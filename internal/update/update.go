@@ -114,6 +114,9 @@ func New(store Store, log *slog.Logger, installed string) (*Updater, error) {
 				Proxy:                 platform.SystemProxy,
 				ForceAttemptHTTP2:     true,
 				ResponseHeaderTimeout: 30 * time.Second,
+				// Checks are hours apart; a connection is not kept waiting
+				// for the next one.
+				IdleConnTimeout: 30 * time.Second,
 			},
 		},
 		state: State{Version: installed, Phase: PhaseIdle, Prereleases: store.UpdatePrereleases()},

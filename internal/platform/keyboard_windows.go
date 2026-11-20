@@ -1,6 +1,7 @@
 package platform
 
 import (
+	"fmt"
 	"time"
 	"unsafe"
 )
@@ -27,16 +28,27 @@ const (
 	keysUpWait = 400 * time.Millisecond
 )
 
-// keyboardInput is INPUT with a KEYBDINPUT, padded to the size of the union's
-// largest member.
+// keyboardInput is INPUT with a KEYBDINPUT. The union is aligned like the
+// pointer in its members, so on 64-bit Windows it starts after 4 bytes of
+// padding, and it is as large as its largest member, MOUSEINPUT, which is 8
+// bytes longer than KEYBDINPUT: 40 bytes in all there, 28 on 32-bit.
+// SendInput refuses any other size.
 type keyboardInput struct {
-	kind      uint32
+	kind uint32
+	ki   keybdInput
+	_    [8]byte
+}
+
+type keybdInput struct {
 	vk        uint16
 	scan      uint16
 	flags     uint32
 	time      uint32
 	extraInfo uintptr
-	_         [8]byte
+}
+
+func keyInput(vk uint16, flags uint32) keyboardInput {
+	return keyboardInput{kind: inputKeyboard, ki: keybdInput{vk: vk, flags: flags}}
 }
 
 func keyDown(vk uint16) bool {
@@ -44,20 +56,22 @@ func keyDown(vk uint16) bool {
 	return state&0x8000 != 0
 }
 
-func sendKeys(inputs []keyboardInput) {
-	procSendInput.Call(uintptr(len(inputs)), uintptr(unsafe.Pointer(&inputs[0])), unsafe.Sizeof(inputs[0]))
+func sendKeys(inputs []keyboardInput) error {
+	n, _, err := procSendInput.Call(uintptr(len(inputs)), uintptr(unsafe.Pointer(&inputs[0])), unsafe.Sizeof(inputs[0]))
+	if int(n) != len(inputs) {
+		return fmt.Errorf("模拟按键失败：%w", err)
+	}
+	return nil
 }
 
 // maskModifierRelease presses a key that does nothing while Alt or Windows
 // is held. The hotkey's own key never reached the program, so letting go of
 // Alt would otherwise open its menu, and of Windows the Start menu.
-func maskModifierRelease() {
+func maskModifierRelease() error {
 	if keyDown(vkMenu) || keyDown(vkLeftWin) || keyDown(vkRightWin) {
-		sendKeys([]keyboardInput{
-			{kind: inputKeyboard, vk: vkMask},
-			{kind: inputKeyboard, vk: vkMask, flags: keyeventfKeyUp},
-		})
+		return sendKeys([]keyboardInput{keyInput(vkMask, 0), keyInput(vkMask, keyeventfKeyUp)})
 	}
+	return nil
 }
 
 // waitForKeysUp waits, up to keysUpWait, until no key is held.
@@ -92,15 +106,15 @@ var heldModifiers = []struct {
 // pressCopy presses Ctrl with key. Control goes down before any held Alt or
 // Windows key is released, so releasing them does not open a menu or the
 // Start menu.
-func pressCopy(key uint16, extended bool) {
-	inputs := []keyboardInput{{kind: inputKeyboard, vk: vkLeftControl}}
+func pressCopy(key uint16, extended bool) error {
+	inputs := []keyboardInput{keyInput(vkLeftControl, 0)}
 	for _, m := range heldModifiers {
 		if keyDown(m.vk) {
 			flags := uint32(keyeventfKeyUp)
 			if m.extended {
 				flags |= keyeventfExtended
 			}
-			inputs = append(inputs, keyboardInput{kind: inputKeyboard, vk: m.vk, flags: flags})
+			inputs = append(inputs, keyInput(m.vk, flags))
 		}
 	}
 	var keyFlags uint32
@@ -108,9 +122,9 @@ func pressCopy(key uint16, extended bool) {
 		keyFlags = keyeventfExtended
 	}
 	inputs = append(inputs,
-		keyboardInput{kind: inputKeyboard, vk: key, flags: keyFlags},
-		keyboardInput{kind: inputKeyboard, vk: key, flags: keyFlags | keyeventfKeyUp},
-		keyboardInput{kind: inputKeyboard, vk: vkLeftControl, flags: keyeventfKeyUp},
+		keyInput(key, keyFlags),
+		keyInput(key, keyFlags|keyeventfKeyUp),
+		keyInput(vkLeftControl, keyeventfKeyUp),
 	)
-	sendKeys(inputs)
+	return sendKeys(inputs)
 }

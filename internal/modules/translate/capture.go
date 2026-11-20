@@ -89,7 +89,7 @@ func (c *capture) finish(area ui.Rect) {
 	px := func(v float64) int { return int(math.Round(v * s)) }
 	img := c.shot.Crop(px(area.X), px(area.Y), px(area.W), px(area.H))
 	c.close()
-	go c.m.readScreen(img)
+	go c.m.readScreen(c.m.requests.Add(1), img)
 }
 
 // Frame draws the frozen screen and the selection, and handles the drag.

@@ -9,7 +9,7 @@ import "fmt"
 
 // ServiceInstalled reports whether the index service is installed.
 func ServiceInstalled() (bool, error) {
-	st, err := queryService()
+	st, _, err := queryService()
 	if err != nil {
 		return false, fmt.Errorf("查询文件索引服务失败：%w", err)
 	}

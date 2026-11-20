@@ -5,6 +5,7 @@ package fileindex
 import (
 	"bytes"
 	"strings"
+	"unicode/utf8"
 )
 
 // A query follows Everything's syntax:
@@ -44,8 +45,12 @@ const (
 type term struct {
 	kind termKind
 	not  bool
+	// only is termFile or termFolder for a word restricted to files or to
+	// folders, as in "file:report", where not negates both together.
+	only termKind
 	text string   // folded
 	exts []string // folded, for termExt
+	wild []rune   // text as characters, for termWildName and termWildPath
 }
 
 func parseQuery(s string) query {
@@ -59,7 +64,9 @@ func parseQuery(s string) query {
 		}
 		var ts []term
 		for alt := range strings.SplitSeq(tok, "|") {
-			ts = append(ts, parseTerm(alt)...)
+			if t, ok := parseTerm(alt); ok {
+				ts = append(ts, t)
+			}
 		}
 		if len(ts) == 0 {
 			continue
@@ -70,13 +77,6 @@ func parseQuery(s string) query {
 			or = false
 			continue
 		}
-		// A term such as "file:report" yields two terms, both required.
-		if !strings.Contains(tok, "|") {
-			for _, t := range ts {
-				q.groups = append(q.groups, []term{t})
-			}
-			continue
-		}
 		q.groups = append(q.groups, ts)
 	}
 	for _, g := range q.groups {
@@ -84,14 +84,33 @@ func parseQuery(s string) query {
 			continue
 		}
 		t := g[0]
-		if t.kind == termName && len(t.text) > len(q.anchor) {
-			q.anchor = t.text
+		anchor := ""
+		switch t.kind {
+		case termName:
+			anchor = t.text
+		case termWildName:
+			anchor = literal(t.text)
+		}
+		if len(anchor) > len(q.anchor) {
+			q.anchor = anchor
 		}
 		if q.rank == "" && (t.kind == termName || t.kind == termPath) {
 			q.rank = t.text[strings.LastIndexByte(t.text, '\\')+1:]
 		}
 	}
 	return q
+}
+
+// literal returns the longest run of a wildcard pattern without * or ?,
+// which every name the pattern matches contains.
+func literal(pattern string) string {
+	best := ""
+	for part := range strings.FieldsFuncSeq(pattern, func(r rune) bool { return r == '*' || r == '?' }) {
+		if len(part) > len(best) {
+			best = part
+		}
+	}
+	return best
 }
 
 // tokenize splits at spaces outside quotes and keeps a lone | as a token.
@@ -119,7 +138,9 @@ func tokenize(s string) []string {
 	return out
 }
 
-func parseTerm(s string) []term {
+// parseTerm parses one word of a query; ok is false when it asks for
+// nothing, such as an empty "ext:".
+func parseTerm(s string) (t term, ok bool) {
 	not := false
 	for strings.HasPrefix(s, "!") {
 		not, s = !not, s[1:]
@@ -134,53 +155,58 @@ func parseTerm(s string) []term {
 			}
 		}
 		if len(exts) == 0 {
-			return nil
+			return term{}, false
 		}
-		return []term{{kind: termExt, not: not, exts: exts}}
+		return term{kind: termExt, not: not, exts: exts}, true
 	case strings.HasPrefix(f, "file:"), strings.HasPrefix(f, "folder:"):
 		kind, rest := termFile, f[len("file:"):]
 		if strings.HasPrefix(f, "folder:") {
 			kind, rest = termFolder, f[len("folder:"):]
 		}
-		out := []term{{kind: kind, not: not}}
-		if rest != "" {
-			out = append(out, textTerm(rest, not))
+		if rest == "" {
+			return term{kind: kind, not: not}, true
 		}
-		return out
+		t := textTerm(rest, not)
+		t.only = kind
+		return t, true
 	case f == "":
-		return nil
+		return term{}, false
 	}
-	return []term{textTerm(f, not)}
+	return textTerm(f, not), true
 }
 
 func textTerm(f string, not bool) term {
 	wild := strings.ContainsAny(f, "*?")
 	path := strings.Contains(f, `\`)
-	kind := termName
+	t := term{kind: termName, not: not, text: f}
 	switch {
 	case wild && path:
-		kind = termWildPath
+		t.kind = termWildPath
 	case wild:
-		kind = termWildName
+		t.kind = termWildName
 	case path:
-		kind = termPath
+		t.kind = termPath
 	}
-	return term{kind: kind, not: not, text: f}
+	if wild {
+		t.wild = []rune(f)
+	}
+	return t
 }
 
 // candidate is an entry being tested against a query; it builds the
-// entry's folded path once, when a term needs it.
+// entry's folded path once, when a term needs it, in a buffer that the
+// next entry reuses.
 type candidate struct {
 	v      *volume
 	i      int
-	path   string
+	path   []byte
 	pathOK bool
 	built  bool
 }
 
-func (c *candidate) foldedPath() (string, bool) {
+func (c *candidate) foldedPath() ([]byte, bool) {
 	if !c.built {
-		c.path, c.pathOK = c.v.path(c.i, true)
+		c.path, c.pathOK = c.v.appendPath(c.path[:0], c.i, true)
 		c.built = true
 	}
 	return c.path, c.pathOK
@@ -204,20 +230,23 @@ func (q *query) match(c *candidate) bool {
 
 func (t *term) match(c *candidate) bool {
 	dir := c.v.flags[c.i]&flagDir != 0
+	if t.only == termFile && dir || t.only == termFolder && !dir {
+		return false
+	}
 	switch t.kind {
 	case termName:
 		return bytes.Contains(c.v.name(c.i, true), []byte(t.text))
 	case termWildName:
-		return wildcard(t.text, string(c.v.name(c.i, true)))
+		return wildcard(t.wild, c.v.name(c.i, true))
 	case termPath, termWildPath:
 		p, ok := c.foldedPath()
 		if !ok {
 			return false
 		}
 		if t.kind == termPath {
-			return strings.Contains(p, t.text)
+			return bytes.Contains(p, []byte(t.text))
 		}
-		return wildcard(t.text, p)
+		return wildcard(t.wild, p)
 	case termExt:
 		if dir {
 			return false
@@ -241,23 +270,24 @@ func (t *term) match(c *candidate) bool {
 	return false
 }
 
-// wildcard matches s against a pattern of * (any run) and ? (any one
-// character) as a whole.
-func wildcard(pattern, s string) bool {
-	p, r := []rune(pattern), []rune(s)
+// wildcard matches s, UTF-8, against a pattern of * (any run) and ? (any
+// one character) as a whole.
+func wildcard(p []rune, s []byte) bool {
 	pi, si := 0, 0
 	star, mark := -1, 0
-	for si < len(r) {
+	for si < len(s) {
+		r, n := utf8.DecodeRune(s[si:])
 		switch {
-		case pi < len(p) && (p[pi] == '?' || p[pi] == r[si]):
+		case pi < len(p) && (p[pi] == '?' || p[pi] == r):
 			pi++
-			si++
+			si += n
 		case pi < len(p) && p[pi] == '*':
 			star, mark = pi, si
 			pi++
 		case star >= 0:
 			pi = star + 1
-			mark++
+			_, m := utf8.DecodeRune(s[mark:])
+			mark += m
 			si = mark
 		default:
 			return false

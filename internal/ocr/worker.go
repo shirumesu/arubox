@@ -11,6 +11,8 @@ import (
 	"os/exec"
 	"runtime/debug"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"github.com/shirumesu/arubox/internal/platform"
 )
@@ -82,11 +84,19 @@ func serve(dir string, in io.Reader, out io.Writer) error {
 	}
 }
 
+// workerTimeout is how long the worker may take to load the model or to
+// read a picture, which take a second or a few. One that takes longer is
+// stuck and is ended, so that it does not hold up the reads and the
+// settings that wait for it for good.
+const workerTimeout = time.Minute
+
 // worker is a running worker process.
 type worker struct {
 	cmd   *exec.Cmd
 	stdin io.Writer
 	dec   *gob.Decoder
+	// stuck is set when the worker was ended for taking too long.
+	stuck atomic.Bool
 }
 
 // startWorker starts a worker on the files in dir and waits until it has
@@ -111,6 +121,7 @@ func startWorker(dir string, log *slog.Logger) (*worker, error) {
 		return nil, fmt.Errorf("启动 PP-OCRv6 进程失败：%w", err)
 	}
 	w := &worker{cmd: cmd, stdin: stdin, dec: gob.NewDecoder(stdout)}
+	defer w.watch()()
 	var r reply
 	if err := w.dec.Decode(&r); err != nil {
 		return nil, w.died()
@@ -122,9 +133,11 @@ func startWorker(dir string, log *slog.Logger) (*worker, error) {
 	return w, nil
 }
 
-// read has the worker read the text in img. When the worker has ended, the
-// error wraps errWorkerDied, and the worker must not be used again.
+// read has the worker read the text in img. When the worker has ended,
+// workerEnded reports so for the error, and the worker must not be used
+// again.
 func (w *worker) read(img platform.Image) ([]platform.TextLine, error) {
+	defer w.watch()()
 	if _, err := fmt.Fprintf(w.stdin, "%d %d\n", img.Width, img.Height); err != nil {
 		return nil, w.died()
 	}
@@ -141,11 +154,34 @@ func (w *worker) read(img platform.Image) ([]platform.TextLine, error) {
 	return r.Lines, nil
 }
 
-var errWorkerDied = errors.New("PP-OCRv6 进程意外退出")
+// watch ends the worker if it has not answered within workerTimeout, which
+// breaks its pipes and so the wait for it. The returned function stops
+// watching.
+func (w *worker) watch() (stop func()) {
+	t := time.AfterFunc(workerTimeout, func() {
+		w.stuck.Store(true)
+		// Killing fails only for a process that has already ended.
+		_ = w.cmd.Process.Kill()
+	})
+	return func() { t.Stop() }
+}
+
+var (
+	errWorkerDied  = errors.New("PP-OCRv6 进程意外退出")
+	errWorkerStuck = fmt.Errorf("PP-OCRv6 %d 秒没有响应，已结束它的进程", int(workerTimeout/time.Second))
+)
+
+// workerEnded reports whether err, from the worker, says it has ended.
+func workerEnded(err error) bool {
+	return errors.Is(err, errWorkerDied) || errors.Is(err, errWorkerStuck)
+}
 
 // died waits for a worker that stopped answering and says how it ended.
 func (w *worker) died() error {
 	w.stop()
+	if w.stuck.Load() {
+		return errWorkerStuck
+	}
 	return fmt.Errorf("%w（%s）", errWorkerDied, w.cmd.ProcessState)
 }
 

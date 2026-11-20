@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 
 	"github.com/shirumesu/arubox/internal/fileindex"
-	"github.com/shirumesu/arubox/internal/platform"
 )
 
 // builtinExcludes are the folders the index always leaves out, besides the
@@ -67,18 +66,16 @@ func newFileIndex(log *slog.Logger, excluded []string) (*fileIndex, error) {
 // stop disconnects from the service and saves the index.
 func (f *fileIndex) stop() { f.client.Stop() }
 
-// search finds files and folders by a query in Everything's syntax, best
-// first.
-func (f *fileIndex) search(ctx context.Context, q string, n int) []platform.FoundFile {
-	paths := f.client.Search(ctx, q, n)
-	out := make([]platform.FoundFile, len(paths))
-	for i, p := range paths {
-		out[i] = platform.FoundFile{Path: p}
-	}
-	return out
+// search finds the paths of files and folders by a query in Everything's
+// syntax, best first.
+func (f *fileIndex) search(ctx context.Context, q string, n int) []string {
+	return f.client.Search(ctx, q, n)
 }
 
 func (f *fileIndex) setExcluded(excluded []string) { f.client.SetExcluded(excluded) }
+
+// loaded is closed once the saved index has been read.
+func (f *fileIndex) loaded() <-chan struct{} { return f.client.Loaded() }
 
 func (f *fileIndex) status() FileIndexStatus {
 	s := f.client.Status()

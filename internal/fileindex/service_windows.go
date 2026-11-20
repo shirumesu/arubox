@@ -28,7 +28,13 @@ const (
 // The service needs administrator rights only to read volumes. It keeps no
 // index of its own: it lists each volume's file table and streams its
 // changes to the program, which may be a program of only the user who
-// installed the service, through a pipe only that user can open.
+// installed the service, through a pipe only that user can open. It does
+// not start with Windows: the program starts it when it searches files,
+// and it stops once no program has been connected for idleExit.
+
+// idleExit is how long the service stays without a program connected. It
+// outlasts the program restarting or file search being turned off and on.
+const idleExit = 30 * time.Second
 
 type service struct {
 	sid string // the user the pipe is open to
@@ -57,10 +63,29 @@ func (s *service) Execute(_ []string, req <-chan svc.ChangeRequest, status chan<
 		return true, 1
 	}
 	failed := make(chan error, 1)
-	go func() { failed <- s.listen(stop) }()
+	// connected carries +1 when a program connects and -1 when it goes,
+	// until quit closes as Execute returns.
+	connected, quit := make(chan int), make(chan struct{})
+	defer close(quit)
+	go func() { failed <- s.listen(stop, connected, quit) }()
 	status <- svc.Status{State: svc.Running, Accepts: svc.AcceptStop | svc.AcceptShutdown}
+	programs := 0
+	idle := time.NewTimer(idleExit)
+	defer idle.Stop()
 	for {
 		select {
+		case d := <-connected:
+			programs += d
+			if programs == 0 {
+				idle.Reset(idleExit)
+			} else {
+				idle.Stop()
+			}
+		case <-idle.C:
+			status <- svc.Status{State: svc.StopPending}
+			_ = windows.SetEvent(stop)
+			s.log.Info("stopping: no program connected", "for", idleExit)
+			return false, 0
 		case err := <-failed:
 			s.log.Error("listen", "error", err)
 			status <- svc.Status{State: svc.StopPending}
@@ -79,8 +104,9 @@ func (s *service) Execute(_ []string, req <-chan svc.ChangeRequest, status chan<
 	}
 }
 
-// listen accepts the program's connections until stop is set.
-func (s *service) listen(stop windows.Handle) error {
+// listen accepts the program's connections until stop is set, telling
+// connected of each one as it begins and ends.
+func (s *service) listen(stop windows.Handle, connected chan<- int, quit <-chan struct{}) error {
 	sd, err := windows.SecurityDescriptorFromString("D:P(A;;GA;;;SY)(A;;GRGW;;;" + s.sid + ")")
 	if err != nil {
 		return fmt.Errorf("pipe security: %w", err)
@@ -105,7 +131,14 @@ func (s *service) listen(stop windows.Handle) error {
 		_, err = p.do(func(ov *windows.Overlapped) error { return windows.ConnectNamedPipe(h, ov) })
 		switch {
 		case err == nil || errors.Is(err, windows.ERROR_PIPE_CONNECTED):
-			go s.serve(h, stop)
+			if !tell(connected, 1, quit) {
+				closeHandle(h)
+				return nil
+			}
+			go func() {
+				s.serve(h, stop)
+				tell(connected, -1, quit)
+			}()
 		case errors.Is(err, errStopped):
 			closeHandle(h)
 			return nil
@@ -113,6 +146,17 @@ func (s *service) listen(stop windows.Handle) error {
 			s.log.Warn("accept connection", "error", err)
 			closeHandle(h)
 		}
+	}
+}
+
+// tell sends d on connected, unless Execute has returned and closed quit;
+// it reports whether it was sent.
+func tell(connected chan<- int, d int, quit <-chan struct{}) bool {
+	select {
+	case connected <- d:
+		return true
+	case <-quit:
+		return false
 	}
 }
 

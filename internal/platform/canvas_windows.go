@@ -8,6 +8,7 @@ import (
 	"golang.org/x/sys/windows"
 
 	"github.com/shirumesu/arubox/internal/design"
+	"github.com/shirumesu/arubox/internal/pixellock"
 )
 
 // A Canvas draws one desktop surface with Direct2D into a bitmap that the
@@ -46,7 +47,7 @@ const (
 	slotGdiGetDC     = 3 // ID2D1GdiInteropRenderTarget
 	slotGdiReleaseDC = 4
 
-	slotRTCreateBitmap          = 4 // ID2D1RenderTarget
+	slotRTCreateSharedBitmap    = 6 // ID2D1RenderTarget
 	slotRTCreateSolidColorBrush = 8
 	slotRTFillRectangle         = 17
 	slotRTDrawRoundedRectangle  = 18
@@ -337,7 +338,7 @@ func (c *Canvas) FillRoundRect(b Box, radius float64, col design.Color) {
 // centred on its edge.
 func (c *Canvas) StrokeRoundRect(b Box, radius, width float64, col design.Color) {
 	r := d2dRoundedRect{toD2DRect(b), float32(radius), float32(radius)}
-	call(c.target, slotRTDrawRoundedRectangle, uintptr(unsafe.Pointer(&r)), c.color(col), f32(width), 0)
+	callf(c.target, slotRTDrawRoundedRectangle, "iifi", uintptr(unsafe.Pointer(&r)), c.color(col), f32(width), 0)
 }
 
 // PushClip limits drawing to a rectangle until PopClip.
@@ -358,15 +359,20 @@ type Bitmap struct {
 	Height     int
 }
 
-// NewBitmap makes a bitmap from BGRA pixels with premultiplied alpha.
+// NewBitmap makes a bitmap from BGRA pixels with premultiplied alpha. The
+// bitmap reads img's pixels, which must not change while it is in use: one
+// made by copying them would land in the software rasterizer's pool, which
+// keeps its buffers for the life of the process.
 func (c *Canvas) NewBitmap(img Image) *Bitmap {
-	if img.Width == 0 || img.Height == 0 {
+	if img.Width == 0 || img.Height == 0 || len(img.Pixels) < img.Width*img.Height*4 {
 		return nil
 	}
 	props := d2dBitmapProperties{PixelFormat: d2dPixelFormat{dxgiFormatB8G8R8A8, d2dAlphaPremultiplied}, DpiX: 96, DpiY: 96}
-	size := uintptr(uint32(img.Width)) | uintptr(uint32(img.Height))<<32
+	lock := pixellock.New(img.Pixels, img.Width, img.Height)
 	var b comObject
-	if !succeeded(call(c.target, slotRTCreateBitmap, size, uintptr(unsafe.Pointer(&img.Pixels[0])), uintptr(img.Width*4), uintptr(unsafe.Pointer(&props)), uintptr(unsafe.Pointer(&b)))) {
+	hr := call(c.target, slotRTCreateSharedBitmap, uintptr(unsafe.Pointer(&pixellock.IID)), lock, uintptr(unsafe.Pointer(&props)), uintptr(unsafe.Pointer(&b)))
+	pixellock.Release(lock)
+	if !succeeded(hr) {
 		return nil
 	}
 	bm := &Bitmap{obj: b, canvas: c, generation: c.generation, Width: img.Width, Height: img.Height}
@@ -392,7 +398,7 @@ func (b *Bitmap) Release() {
 // DrawBitmap draws a bitmap scaled into a rectangle.
 func (c *Canvas) DrawBitmap(b *Bitmap, dst Box, opacity float64) {
 	r := toD2DRect(dst)
-	call(c.target, slotRTDrawBitmap, uintptr(b.obj), uintptr(unsafe.Pointer(&r)), f32(opacity), d2dInterpolationLinear, 0)
+	callf(c.target, slotRTDrawBitmap, "iifii", uintptr(b.obj), uintptr(unsafe.Pointer(&r)), f32(opacity), d2dInterpolationLinear, 0)
 }
 
 // Font describes how text is set.
@@ -445,7 +451,7 @@ func textFormat(f Font) (comObject, error) {
 		weight = dwriteWeightSemiBold
 	}
 	var tf comObject
-	if !succeeded(call(dwFactory, slotDWCreateTextFormat, uintptr(unsafe.Pointer(family)), 0, weight, 0, dwriteStretchNormal,
+	if !succeeded(callf(dwFactory, slotDWCreateTextFormat, "iiiiifii", uintptr(unsafe.Pointer(family)), 0, weight, 0, dwriteStretchNormal,
 		f32(f.Size), uintptr(unsafe.Pointer(&locale[0])), uintptr(unsafe.Pointer(&tf)))) {
 		return nil, errors.New("创建字体失败")
 	}
@@ -459,7 +465,7 @@ func textFormat(f Font) (comObject, error) {
 		wrap = dwriteNoWrap
 	}
 	call(tf, slotTFSetWordWrapping, wrap)
-	call(tf, slotTFSetLineSpacing, dwriteLineSpacingUniform, f32(f.LineHeight), f32(f.LineHeight*0.8))
+	callf(tf, slotTFSetLineSpacing, "iff", dwriteLineSpacingUniform, f32(f.LineHeight), f32(f.LineHeight*0.8))
 	var sign comObject
 	if succeeded(call(dwFactory, slotDWCreateEllipsisTrimmingSign, uintptr(tf), uintptr(unsafe.Pointer(&sign)))) {
 		trimming := struct{ Granularity, Delimiter, DelimiterCount uint32 }{Granularity: dwriteTrimCharacter}
@@ -486,7 +492,7 @@ func NewTextLayout(text string, f Font, width float64) *TextLayout {
 		height = float64(f.Lines) * f.LineHeight
 	}
 	var l comObject
-	if !succeeded(call(dwFactory, slotDWCreateTextLayout, uintptr(unsafe.Pointer(&s[0])), uintptr(len(s)-1), uintptr(tf),
+	if !succeeded(callf(dwFactory, slotDWCreateTextLayout, "iiiffi", uintptr(unsafe.Pointer(&s[0])), uintptr(len(s)-1), uintptr(tf),
 		f32(width), f32(height), uintptr(unsafe.Pointer(&l)))) {
 		return nil
 	}
@@ -500,5 +506,5 @@ func NewTextLayout(text string, f Font, width float64) *TextLayout {
 
 // DrawText draws a text layout with its top left corner at x, y.
 func (c *Canvas) DrawText(t *TextLayout, x, y float64, col design.Color) {
-	call(c.target, slotRTDrawTextLayout, point2F(x, y), uintptr(t.obj), c.color(col), d2dDrawTextEnableColorFont)
+	callf(c.target, slotRTDrawTextLayout, "piii", point2F(x, y), uintptr(t.obj), c.color(col), d2dDrawTextEnableColorFont)
 }

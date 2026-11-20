@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"runtime/debug"
 	"strings"
 
 	"github.com/shirumesu/arubox/internal/design"
@@ -71,6 +72,9 @@ type overlay struct {
 	windows   []ui.Rect
 	translate bool
 	ended     bool
+	// away is set while the editor is hidden for the picture to be copied
+	// or saved, and may come back.
+	away bool
 
 	hasSel    bool
 	sel       ui.Rect
@@ -120,8 +124,13 @@ func openOverlay(m *Module, s start) (*overlay, error) {
 	o.size = ui.Point{X: float64(b.W) / o.scale, Y: float64(b.H) / o.scale}
 	o.windows = windowsOn(b, o.scale, s.windows)
 	o.updateHover(ui.Point{X: s.cursor.X / o.scale, Y: s.cursor.Y / o.scale})
-	// Switching to another window ends the capture, as Esc does.
-	win.OnDeactivate = o.end
+	// Switching to another window ends the capture, as Esc does; hiding to
+	// copy or save does not.
+	win.OnDeactivate = func() {
+		if !o.away {
+			o.end()
+		}
+	}
 	win.OnClose = func() bool {
 		o.end()
 		return false
@@ -158,6 +167,9 @@ func (o *overlay) release() {
 	}
 	o.shapes, o.undone, o.draft = nil, nil, nil
 	o.image = platform.Image{}
+	// The capture is tens of megabytes on a large display; give it back to
+	// the system now rather than whenever the runtime gets to it.
+	go debug.FreeOSMemory()
 }
 
 func (o *overlay) dropShapes(all []*shape) {
@@ -379,7 +391,7 @@ func (o *overlay) move(p ui.Point) {
 		} else {
 			s.to = p
 			if s.kind == toolMosaic {
-				updateMosaic(s, o.image, o.scale)
+				updateMosaic(s, o.image, o.scale, false)
 			}
 		}
 	}
@@ -409,6 +421,9 @@ func (o *overlay) finishDrag() {
 		o.draft = nil
 		if s == nil {
 			return
+		}
+		if s.kind == toolMosaic {
+			updateMosaic(s, o.image, o.scale, true)
 		}
 		b := boxFrom(s.from, s.to)
 		kept := b.W+b.H > 3
@@ -953,6 +968,7 @@ func (o *overlay) flatten() (picture, error) {
 	return picture(base), nil
 }
 
+// copy puts the finished picture on the clipboard.
 func (o *overlay) copy() {
 	if o.pending != "" || !o.hasSel {
 		return
@@ -962,10 +978,10 @@ func (o *overlay) copy() {
 		o.failed(err)
 		return
 	}
-	o.end()
-	go o.m.copyPicture(p)
+	o.deliver("copy screenshot", func() (bool, error) { return true, p.copy() })
 }
 
+// save asks where to save the finished picture and saves it there.
 func (o *overlay) save() {
 	if o.pending != "" || !o.hasSel {
 		return
@@ -975,8 +991,39 @@ func (o *overlay) save() {
 		o.failed(err)
 		return
 	}
-	o.end()
-	go o.m.savePicture(p)
+	o.deliver("save screenshot", func() (bool, error) { return o.m.save(p) })
+}
+
+// deliver runs send on a goroutine of its own and ends the capture once
+// send has done its part. The editor hides meanwhile, out of the way of
+// the save dialog, and comes back as it was when send is cancelled
+// (false) or fails, showing why: the selection and its annotations are
+// not lost with it.
+func (o *overlay) deliver(what string, send func() (bool, error)) {
+	o.message = ""
+	o.away = true
+	o.win.Hide()
+	go func() {
+		done, err := send()
+		ui.Post(func() {
+			if o.ended {
+				// The module was turned off meanwhile.
+				if err != nil {
+					o.m.log.Warn(what, "error", err)
+				}
+				return
+			}
+			o.away = false
+			if done && err == nil {
+				o.end()
+				return
+			}
+			if err != nil {
+				o.failed(err)
+			}
+			o.win.Show(true)
+		})
+	}()
 }
 
 // pin pins the finished picture where it was selected.
@@ -1029,18 +1076,13 @@ func (o *overlay) readText() {
 	}()
 }
 
-// copyText closes the editor and copies the read text, as edited.
+// copyText copies the read text, as edited, and closes the editor.
 func (o *overlay) copyText() {
 	if o.pending != "" {
 		return
 	}
 	text := o.ocr.Text
-	o.end()
-	go func() {
-		if err := platform.CopyText(text); err != nil {
-			o.m.log.Warn("copy screenshot text", "error", err)
-		}
-	}()
+	o.deliver("copy screenshot text", func() (bool, error) { return true, platform.CopyText(text) })
 }
 
 // translateText reads the selection's text and shows it in the
